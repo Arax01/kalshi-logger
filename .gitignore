@@ -1,0 +1,36 @@
+# --- Data: never commit the database or anything it writes ---
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# --- Logs ---
+logs/
+*.log
+
+# --- Generated reports (stay on your laptop) ---
+reports/
+
+# --- Secrets: keys and credentials never go in git ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*
+secrets*
+
+# --- Runtime files ---
+*.pid
+STOP
+
+# --- Python ---
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
