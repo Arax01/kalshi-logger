@@ -139,7 +139,9 @@ CREATE TABLE IF NOT EXISTS crypto_fv (
     expiry_hi_ts INTEGER,
     vol_lo REAL,            -- implied vol at this strike for each bracketing expiry
     vol_hi REAL,
-    fair_yes REAL,
+    fair_yes REAL,          -- our fair probability (options-implied vol): the approved model
+    vol_realised REAL,      -- audit: vol measured from the settlement index over the last 3 hours
+    fair_yes_realised REAL, -- audit: same model using vol_realised instead
     yes_bid REAL,
     yes_ask REAL,
     bid_size REAL,
