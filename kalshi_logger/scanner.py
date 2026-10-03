@@ -2,7 +2,7 @@
 
 Each scan:
 1. Pages through every open non-combo market (about 130k, 1000 per request) and stores a
-   snapshot for each market whose quote, size or volume changed since its last stored row
+   snapshot for each market whose best bid, best ask or volume changed since its last stored row
    (and at least every 2 hours). Unchanged markets are skipped to keep the database small.
 2. Reads the public trade feed since the previous scan to find combo (multi-leg) markets that
    actually traded, stores trade stats for the most-traded ones, and snapshots a capped sample.
@@ -48,10 +48,10 @@ def write_snapshot(conn, scan_id, m, mid, prev, ts, gaps, force=False):
     bid_cc, ask_cc = to_cc(bid), to_cc(ask)
     volume = num(m.get("volume_fp"))
     if prev is not None and prev["last_snap_ts"] is not None and not force:
+        # Size-only changes (orders added/removed at the same price) don't trigger a row; they are
+        # very frequent and not needed for spread/volume/price-move analysis.
         unchanged = (
-            prev["last_bid_cc"] == bid_cc and prev["last_ask_cc"] == ask_cc
-            and prev["last_bid_size"] == bid_size and prev["last_ask_size"] == ask_size
-            and prev["last_volume"] == volume
+            prev["last_bid_cc"] == bid_cc and prev["last_ask_cc"] == ask_cc and prev["last_volume"] == volume
         )
         if unchanged and ts - prev["last_snap_ts"] < KEEPALIVE_SEC:
             return False
