@@ -26,6 +26,9 @@ AVERAGING_ADJ_SEC = 40
 CURRENCIES = {"BTC": "btc_usd", "ETH": "eth_usd"}
 _surface_cache = {}
 SURFACE_MAX_AGE = 110
+LONG_DATED_EVERY_SEC = 590
+ALWAYS_LOG_EDGE = 0.02
+_last_logged = {}
 
 
 def _surface(asset):
@@ -113,11 +116,24 @@ def fair_value(m, spot, surface, now, vol_override=None):
     return max(0.0, min(1.0, p)), vol, method, e_lo, e_hi, v_lo, v_hi
 
 
-def _worth_logging(fair, edge_yes, edge_no):
-    """Skip far-out strikes where nothing interesting can happen, to keep the database small."""
-    if 0.02 <= fair <= 0.98:
+def _worth_logging(m_id, fair, edge_yes, edge_no, seconds_to_close, now):
+    """Decide whether to store this check, to keep the database small without losing gaps.
+
+    * Any check where taking a price would gain more than 2c after fees (by our model) is stored,
+      so every gap over the report's 3c threshold is captured from start to finish.
+    * Otherwise, strikes so far away that fair value is under 2% or over 98% are skipped.
+    * Markets closing more than a day away are stored every 10 minutes (they move slowly);
+      markets closing within a day are stored on every check.
+    """
+    if max(e for e in (edge_yes, edge_no, -1.0) if e is not None) > ALWAYS_LOG_EDGE:
+        _last_logged[m_id] = now
         return True
-    return max(e for e in (edge_yes, edge_no, -1.0) if e is not None) > -0.05
+    if not 0.02 <= fair <= 0.98:
+        return False
+    if seconds_to_close > 86400 and now - _last_logged.get(m_id, 0) < LONG_DATED_EVERY_SEC:
+        return False
+    _last_logged[m_id] = now
+    return True
 
 
 def run(after_gap=False):
@@ -164,7 +180,8 @@ def run(after_gap=False):
                     if bid is not None else None
                 edge_yes = fair - ask - fee_yes if ask is not None and fee_yes is not None else None
                 edge_no = bid - fair - fee_no if bid is not None and fee_no is not None else None
-                if not _worth_logging(fair, edge_yes, edge_no):
+                secs = parse_ts(m.get("close_time")) - now
+                if not _worth_logging(m["ticker"], fair, edge_yes, edge_no, secs, now):
                     continue
                 mid, _ = catalog.ensure_market(conn, m)
                 conn.execute(
