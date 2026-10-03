@@ -65,5 +65,25 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(classify.classify("X", "Combo", [], is_combo=True)["market_group"], "combo")
 
 
+
+class ReportLogicTests(unittest.TestCase):
+    def test_combo_types(self):
+        from kalshi_logger.reports import _combo_type
+        cross = [{"market": "KXNFLGAME-26OCT05ATLNO-NO"}, {"market": "KXNFLGAME-26OCT05DETCAR-DET"}]
+        same = [{"market": "KXNFLGAME-26OCT05ATLNO-NO"}, {"market": "KXNFLPASSYDS-26OCT05ATLNO-NOTSHOUGH6-250"}]
+        self.assertEqual(_combo_type(cross), "cross-game")
+        self.assertEqual(_combo_type(same), "same-game")
+        self.assertEqual(_combo_type(same + cross[1:]), "mixed")
+
+    def test_implied_vol_round_trip(self):
+        from kalshi_logger.reports import _implied_vol
+        for spot, strike in ((85000, 84800), (85000, 85300)):
+            secs = 3600
+            p = volsurface.prob_above(spot, strike, 0.30, (secs - 40) / volsurface.YEAR_SEC)
+            row = {"strike_type": "greater", "floor_strike": strike, "yes_bid": p - 0.001, "yes_ask": p + 0.001,
+                   "seconds_to_close": secs, "spot": spot}
+            self.assertAlmostEqual(_implied_vol(row), 0.30, places=3)
+
+
 if __name__ == "__main__":
     unittest.main()

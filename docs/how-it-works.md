@@ -59,6 +59,35 @@ itself, including its legs, so the weekly report can compare the combo's price w
 prices. On extremely busy days the trade feed is capped at 400,000 trades per scan, and the report
 says when that happened.
 
+**Combo premium in the weekly report.** Each sampled combo's traded price is divided by the product
+of its legs' Kalshi mid prices, which is the fair price if the legs were unrelated. Combos are split by
+how related their legs can be. The game is read from each leg's ticker; for example `26OCT03SYRCONN` is
+shared by that game's winner, spread, total and player-prop markets.
+- **Cross-game:** every leg from a different game. The legs are close to unrelated, so a price
+  above the legs' product is premium.
+- **Same-game:** all legs from one game. The legs are correlated, so the product understates fair
+  value and some of the difference is not premium.
+- **Mixed:** some of each.
+
+The report gives median and contract-weighted ratios, how much of the overall premium survives in
+cross-game combos, and, once combos settle, the average price paid versus how often they won and
+buyers' return per dollar (before Kalshi's fee).
+
+**Can a regular account sell or quote combos?** In the Kalshi app, no: you request a combo and
+accept or reject the price makers offer. Through the API, Kalshi says any member can respond to
+combo requests ("Any Kalshi member may respond to RFQs via Kalshi's API, which is accessible to all
+traders", a Kalshi spokesperson quoted by Sportico). Kalshi's RFQ documentation describes requests
+being "broadcast to all makers" and lists no extra approval step.
+
+In practice it means:
+- an API key with trading permission
+- software that prices each combo automatically
+- confirming within 3 seconds of acceptance (combos are classed as high-volatility markets)
+- competing with professional firms
+
+Quoters may also pay a maker fee: Kalshi's changelog describes a 0.5 maker-fee multiplier for
+combo quoters in some cases. This logger does none of that; it only reads public data.
+
 ## Priority 2: crypto fair value
 
 **Markets covered:** BTC and ETH above/below (hourly, daily, weekly), ranges, 15-minute up/down,
@@ -92,6 +121,15 @@ Details that matter:
    settles on). Coinbase's price and Kalshi's own chart of the settlement index are stored alongside
    as cross-checks.
 
+**What gets stored.** To keep the database small without losing any gap:
+- every check where taking a price would gain more than 2c after fees is stored, so each gap over
+  the 3c threshold is captured from start to finish;
+- otherwise, strikes whose fair value is under 2% or over 98% are skipped;
+- markets closing more than a day away are stored every 10 minutes;
+- markets closing within a day are stored on every 2-minute check.
+
+That's about 80 rows per check, around 10-15 MB a day.
+
 **Gap after fees, per contract:**
 - Buy YES: `fair - best ask - taker fee` (positive means YES looks cheap)
 - Buy NO (the same as selling YES): `best bid - fair - taker fee` (positive means YES looks expensive)
@@ -106,6 +144,24 @@ vol could be too high for the next hour, since it includes overnight risk. To he
 row also stores an **audit fair value** using volatility measured from Kalshi's own 1-second
 settlement-index chart over the last 3 hours (`fair_yes_realised`). The daily report scores both
 against actual outcomes. Treat `before_first_expiry` gaps with caution until that scoring is in.
+
+**Weekly test: real gap, or wrong volatility input?** The weekly report has a section on markets
+closing within 24 hours. It breaks results down by time left to close (under 15 min, 15-30 min,
+30-60 min, 1-3 h, 3-8 h, 8-24 h) and by time of day, in 4-hour blocks of your computer's local time.
+For each bucket it shows:
+- Accuracy (Brier score) against outcomes for three forecasts: our fair value with options vol, the
+  same model with recent measured vol, and Kalshi's price.
+- Three volatility numbers: the options vol we used, recent measured vol, and **Kalshi-implied vol**
+  (the vol at which our model reproduces Kalshi's price, worked out for above/below markets). By
+  time of day it also shows the vol that actually happened, measured from the logged spot prices.
+- The number of gaps over 3c and the average result per contract had you taken each one, after fees.
+
+**How to read it:**
+- **Volatility input is wrong:** Kalshi forecasts better than our options-vol fair value, Kalshi's
+  implied vol is closer to what happened, and the gaps lose money when taken.
+- **Real pricing difference:** our fair value forecasts at least as well and the gaps make money.
+
+The report states a verdict only once there are at least 50 settled intraday markets and 30 settled gaps.
 
 ## Priority 3: in-game sports
 
