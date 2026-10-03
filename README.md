@@ -60,8 +60,8 @@ the logger is running again. `status.bat` lists recent gaps.
 
 ## Where things are kept
 
-- `data\kalshi.db` is all the recorded data, in one SQLite database file. Expect roughly 50-80 MB a day
-  on busy sports days (about 2 GB a month). To start over, stop the logger and delete the `data`
+- `data\kalshi.db` is all the recorded data, in one SQLite database file. Expect up to about 100 MB a day
+  on busy sports days, less on quiet days (roughly 1.5-3 GB a month). To start over, stop the logger and delete the `data`
   folder.
 - `reports\` holds the reports. `logs\` holds a technical log, useful if something goes wrong.
 - None of these are uploaded anywhere or saved to GitHub.

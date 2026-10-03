@@ -39,9 +39,10 @@ def main(argv):
         return 0
     if cmd == "report":
         runner.setup_logging(console=False)
-        from . import db, reports
+        from . import db, reports, results
         db.init()
         print("Checking for final results and writing any due reports...")
+        results.run()
         paths = reports.run_due() + reports.preview(db.connect())
         for path in paths:
             print("Wrote", path)
