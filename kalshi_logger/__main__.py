@@ -3,7 +3,7 @@
     python -m kalshi_logger run        start logging (what start.bat does)
     python -m kalshi_logger stop       ask a running logger to stop (what stop.bat does)
     python -m kalshi_logger status     show what has been collected and any data gaps
-    python -m kalshi_logger report     write any due reports now (what report.bat does)
+    python -m kalshi_logger report     write any due reports, plus a preview of the latest data
     python -m kalshi_logger once JOB   run one job once (scanner, crypto, ingame, results)
 """
 import sys
@@ -41,8 +41,9 @@ def main(argv):
         runner.setup_logging(console=False)
         from . import db, reports
         db.init()
-        force = "--all" in argv
-        for path in reports.run_due(force_latest=force):
+        print("Checking for final results and writing any due reports...")
+        paths = reports.run_due() + reports.preview(db.connect())
+        for path in paths:
             print("Wrote", path)
         return 0
     if cmd == "once":

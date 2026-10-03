@@ -219,7 +219,21 @@ def connect():
 def init():
     conn = connect()
     conn.executescript(SCHEMA)
+    _add_missing_columns(conn)
     conn.commit()
+
+
+def _add_missing_columns(conn):
+    """Upgrade an older database in place: add any columns that newer code expects."""
+    ref = sqlite3.connect(":memory:")
+    ref.executescript(SCHEMA.replace("PRAGMA journal_mode=WAL;", ""))
+    tables = [r[0] for r in ref.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+    for table in tables:
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for _, name, ctype, *_ in ref.execute(f"PRAGMA table_info({table})"):
+            if name not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ctype}")
+    ref.close()
 
 
 def market_id(conn, ticker, fields):
