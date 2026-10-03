@@ -1,12 +1,19 @@
+import re
 from datetime import datetime, timezone
+
+_ISO = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]00:00)?$")
 
 
 def parse_ts(value):
     """ISO-8601 string -> Unix seconds (int), or None."""
     if not value:
         return None
+    m = _ISO.match(value)
+    if not m:
+        return None
+    # Normalise to whole seconds; older Pythons reject fractions that aren't 3 or 6 digits.
     try:
-        return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+        return int(datetime.fromisoformat(m.group(1) + "+00:00").timestamp())
     except ValueError:
         return None
 

@@ -143,10 +143,6 @@ class SingleInstanceLock:
             self.handle.close()
             self.handle = None
             return False
-        self.handle.seek(0)
-        self.handle.truncate()
-        self.handle.write(str(os.getpid()))
-        self.handle.flush()
         return True
 
 

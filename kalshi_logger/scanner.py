@@ -20,6 +20,7 @@ log = logging.getLogger(__name__)
 KEEPALIVE_SEC = 2 * 3600
 COMBO_TRADE_ROWS = 2000      # most-traded combos whose trade stats are stored each scan
 TICKERS_PER_REQUEST = 100
+PAUSE_IS_GAP_SEC = 10 * 60
 
 
 class StopRequested(Exception):
@@ -98,12 +99,19 @@ def run_scan(after_gap=False):
 
     seen = written = 0
     status, notes = "ok", []
+    last_page_ts = started
     try:
         for page in http.kalshi.paginate(
             "/markets", {"status": "open", "limit": 1000, "mve_filter": "exclude"}, "markets"
         ):
             _check_stop()
             ts = int(time.time())
+            if ts - last_page_ts > PAUSE_IS_GAP_SEC:
+                # The laptop slept (or the network dropped) in the middle of this scan.
+                gaps.append((last_page_ts, ts))
+                conn.execute("INSERT INTO gaps(job, start_ts, end_ts, reason) VALUES('scanner',?,?,?)",
+                             (last_page_ts, ts, "paused during a scan (computer asleep or offline)"))
+            last_page_ts = ts
             for m in page:
                 mid, prev_row = catalog.ensure_market(conn, m)
                 seen += 1
