@@ -206,6 +206,16 @@ CREATE TABLE IF NOT EXISTS games (
     updated_ts INTEGER
 );
 
+-- Each time the logger runs: start, last heartbeat (every minute), end, and whether it stopped
+-- cleanly (stop.bat) or was killed (window closed, crash, power loss).
+CREATE TABLE IF NOT EXISTS process_runs (
+    run_id INTEGER PRIMARY KEY,
+    started_ts INTEGER,
+    heartbeat_ts INTEGER,
+    ended_ts INTEGER,
+    clean INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS reports_done (
     report_type TEXT,
     period_key TEXT,

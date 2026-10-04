@@ -21,7 +21,9 @@ Reports are written to the `reports` folder in plain English:
   among actively traded markets, which move the most for the amount traded, how combos are
   priced compared with their individual legs (split into same-game and cross-game combos), and a
   crypto check of whether short-term gaps are real or a sign our volatility input is off, and a
-  longshot check: do crypto contracts priced under 10 cents win as often as their price says?
+  longshot check: do crypto contracts priced under 10 cents win as often as their price says? It
+  also shows what the in-game logger collected. If the scanner didn't run that week, the report
+  says so and still includes the crypto, longshot and in-game sections.
 
 ## One-time setup (Windows)
 
@@ -59,6 +61,10 @@ Nothing breaks. When the laptop wakes up the logger carries on, and it records t
 as a "gap" so no one mistakes it for a quiet market. Price changes are never calculated across a
 gap. Reports that should have been written while the laptop was asleep are written as soon as
 the logger is running again. `status.bat` lists recent gaps.
+
+The same applies if you close the logger's window instead of using `stop.bat`: the data saved up to
+that moment is kept, and the downtime is recorded as a gap ("closed without stop.bat"). `stop.bat`
+is still the tidier way to stop it.
 
 ## Where things are kept
 

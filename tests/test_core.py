@@ -109,5 +109,22 @@ class ReportLogicTests(unittest.TestCase):
             self.assertFalse(far("B", 0.50, 0.40, 0.60, t0))            # not a far strike
             self.assertFalse(far("C", 0.001, None, None, t0))           # no quotes to learn from
 
+
+class WeeklyReportTests(unittest.TestCase):
+    def test_sections_present_without_scanner_data(self):
+        import sqlite3
+        import tempfile
+        from kalshi_logger import db, reports
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = sqlite3.connect(f"{tmp}/t.db")
+            conn.row_factory = sqlite3.Row
+            conn.executescript(db.SCHEMA)
+            text = reports.scanner_weekly(conn, 0, 2_000_000_000, "test")
+            conn.close()
+        self.assertIn("THE SCANNER COLLECTED NO DATA THIS WEEK", text)
+        for heading in ("3. COMBOS", "4. CRYPTO", "5. LONGSHOTS", "6. IN-GAME"):
+            self.assertIn(heading, text)
+
+
 if __name__ == "__main__":
     unittest.main()
