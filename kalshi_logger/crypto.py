@@ -29,6 +29,10 @@ SURFACE_MAX_AGE = 110
 LONG_DATED_EVERY_SEC = 590
 ALWAYS_LOG_EDGE = 0.02
 _last_logged = {}
+# Far-away strikes (fair value under 2% or over 98%) go to their own table every 30 minutes, for the
+# longshot report. They are kept out of crypto_fv so the gap tracking and accuracy scores are unchanged.
+FAR_STRIKE_EVERY_SEC = 1790
+_far_last_logged = {}
 
 
 def _surface(asset):
@@ -136,10 +140,26 @@ def _worth_logging(m_id, fair, edge_yes, edge_no, seconds_to_close, now):
     return True
 
 
+def _log_far_strike(conn, m, fair, vol, spot, bid, ask, bid_size, ask_size, secs, now):
+    """Store a far-strike check at most every 30 minutes per market. Returns True if stored."""
+    if 0.02 <= fair <= 0.98 or (bid is None and ask is None):
+        return False
+    if now - _far_last_logged.get(m["ticker"], 0) < FAR_STRIKE_EVERY_SEC:
+        return False
+    _far_last_logged[m["ticker"]] = now
+    mid, _ = catalog.ensure_market(conn, m)
+    conn.execute(
+        "INSERT OR REPLACE INTO crypto_far(ts,market_id,seconds_to_close,spot,vol,fair_yes,yes_bid,yes_ask,"
+        "bid_size,ask_size) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (now, mid, secs, spot, vol, fair, bid, ask, bid_size, ask_size),
+    )
+    return True
+
+
 def run(after_gap=False):
     conn = db.connect()
     catalog.refresh(conn)
-    written = 0
+    written = far_written = 0
     series_by_asset = {}
     for series_ticker, asset in config.CRYPTO_SERIES.items():
         series_by_asset.setdefault(asset, []).append(series_ticker)
@@ -182,6 +202,8 @@ def run(after_gap=False):
                 edge_no = bid - fair - fee_no if bid is not None and fee_no is not None else None
                 secs = parse_ts(m.get("close_time")) - now
                 if not _worth_logging(m["ticker"], fair, edge_yes, edge_no, secs, now):
+                    if _log_far_strike(conn, m, fair, vol, spot, bid, ask, bid_size, ask_size, secs, now):
+                        far_written += 1
                     continue
                 mid, _ = catalog.ensure_market(conn, m)
                 conn.execute(
@@ -195,4 +217,4 @@ def run(after_gap=False):
                 )
                 written += 1
             conn.commit()
-    log.info("Crypto: %d fair values logged", written)
+    log.info("Crypto: %d fair values logged, %d far strikes", written, far_written)

@@ -20,7 +20,8 @@ Reports are written to the `reports` folder in plain English:
 - **Weekly scanner report**: which categories, series and player prop types have the widest spreads
   among actively traded markets, which move the most for the amount traded, how combos are
   priced compared with their individual legs (split into same-game and cross-game combos), and a
-  crypto check of whether short-term gaps are real or a sign our volatility input is off.
+  crypto check of whether short-term gaps are real or a sign our volatility input is off, and a
+  longshot check: do crypto contracts priced under 10 cents win as often as their price says?
 
 ## One-time setup (Windows)
 

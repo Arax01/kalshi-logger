@@ -130,6 +130,11 @@ Details that matter:
 
 That's about 80 rows per check, around 10-15 MB a day.
 
+**Far-away strikes** (fair value under 2% or over 98%, with at least one price quoted) go into a
+separate table, `crypto_far`, every 30 minutes. They're kept apart so the gap tracking and accuracy
+scores above are not affected. That's about 1,300 rows per half hour, roughly 4 MB a day, so crypto
+in total stays around 15 MB a day. They feed the longshot section of the weekly report.
+
 **Gap after fees, per contract:**
 - Buy YES: `fair - best ask - taker fee` (positive means YES looks cheap)
 - Buy NO (the same as selling YES): `best bid - fair - taker fee` (positive means YES looks expensive)
@@ -162,6 +167,19 @@ For each bucket it shows:
 - **Real pricing difference:** our fair value forecasts at least as well and the gaps make money.
 
 The report states a verdict only once there are at least 50 settled intraday markets and 30 settled gaps.
+
+**Weekly test: longshot bias.** "Longshot bias" means cheap contracts win less often than their price
+implies. The weekly report looks at every BTC/ETH contract offered under 10c: YES at the ask, or NO
+at 100c minus the YES bid. Data comes from both `crypto_fv` and `crypto_far`. Each market counts once
+per side, at its average price while under 10c. For settled contracts it shows:
+- average price paid
+- our fair value
+- how often they actually won, with a rough 95% range
+- buyers' return per $1 after Kalshi's taker fee
+
+Results are broken down by price (1c, 2-3c, 4-6c, 7-9c), by side, and by whether the market closes
+within 24 hours. Strikes in the same event win or lose together, so the report also counts distinct
+events: the evidence is closer to that number than to the number of contracts.
 
 ## Priority 3: in-game sports
 
@@ -197,6 +215,7 @@ Reports list gaps and never treat them as quiet markets.
 | `scans` | scan: timing, status, markets seen, combo trading totals |
 | `combo_trades` | combo per scan window: trades, contracts, average price, low and high |
 | `crypto_fv` | crypto market per check: spot prices, vol and how it was derived, fair value, audit fair value, quotes, sizes, fees, gaps |
+| `crypto_far` | far-away crypto strike per 30 minutes: fair value, vol, quotes and sizes (for the longshot report) |
 | `games`, `game_snapshots` | game, and game-winner market per minute while the game is in progress |
 | `gaps` | period without data, with a reason |
 | `series` | Kalshi series: category, tags, fee type and multiplier |

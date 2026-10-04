@@ -84,6 +84,30 @@ class ReportLogicTests(unittest.TestCase):
                    "seconds_to_close": secs, "spot": spot}
             self.assertAlmostEqual(_implied_vol(row), 0.30, places=3)
 
+    def test_wilson_range(self):
+        from kalshi_logger.reports import _wilson
+        lo, hi = _wilson(2, 100)
+        self.assertTrue(0.0 < lo < 0.02 < hi < 0.08)
+        self.assertEqual(_wilson(0, 0), (None, None))
+
+    def test_far_strike_logging_every_30_min(self):
+        from unittest import mock
+        from kalshi_logger import crypto
+
+        class FakeConn:
+            def execute(self, sql, params=()):
+                pass
+
+        t0 = 1_791_000_000
+        far = lambda ticker, fair, bid, ask, now: crypto._log_far_strike(
+            FakeConn(), {"ticker": ticker}, fair, 0.3, 85000, bid, ask, 100, 100, 3600, now)
+        with mock.patch.object(crypto.catalog, "ensure_market", return_value=(1, None)):
+            crypto._far_last_logged.clear()
+            self.assertTrue(far("A", 0.005, None, 0.01, t0))
+            self.assertFalse(far("A", 0.005, None, 0.01, t0 + 600))     # too soon
+            self.assertTrue(far("A", 0.005, None, 0.01, t0 + 1800))     # 30 minutes later
+            self.assertFalse(far("B", 0.50, 0.40, 0.60, t0))            # not a far strike
+            self.assertFalse(far("C", 0.001, None, None, t0))           # no quotes to learn from
 
 if __name__ == "__main__":
     unittest.main()
