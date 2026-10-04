@@ -9,12 +9,13 @@ The reports job runs at start-up and every 15 minutes. Any report that is due bu
 """
 import json
 import logging
+import math
 import statistics
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-from . import config, db, results
+from . import config, db, results, volsurface
 
 log = logging.getLogger(__name__)
 
@@ -122,28 +123,10 @@ def _episodes(rows, side_col, threshold, max_step):
     return eps
 
 
-def crypto_daily(conn, day_start, day_end, label):
-    lines = [f"DAILY CRYPTO SUMMARY - {label}", "=" * 60, ""]
+def _gap_episodes(rows):
+    """Gap episodes (both sides) with duration, size, edge and the result if taken at first sight."""
     thr = config.CRYPTO_GAP_THRESHOLD
-    rows = conn.execute(
-        "SELECT f.*, m.ticker, m.result FROM crypto_fv f JOIN markets m USING(market_id) "
-        "WHERE f.ts >= ? AND f.ts < ? ORDER BY f.market_id, f.ts",
-        (day_start, day_end),
-    ).fetchall()
-    gaps_text, gap_sec = _gaps_text(conn, ["crypto"], day_start, day_end)
-    n_markets = len({r["market_id"] for r in rows})
-    lines += [
-        "WHAT THIS COVERS",
-        f"Fair-value checks logged: {len(rows):,} across {n_markets} BTC/ETH markets.",
-        f"Time without data: {_dur(gap_sec) if gap_sec else 'none'}.",
-        gaps_text, "",
-    ]
-    if not rows:
-        lines.append("No crypto data was collected on this day.")
-        return "\n".join(lines)
-
     max_step = config.GAP_FACTOR * config.CRYPTO_INTERVAL_SEC
-    sections = []
     all_eps = []
     for side_col, side_name, price_col, size_col in (
         ("edge_buy_yes", "buy YES (Kalshi price looked too low)", "yes_ask", "ask_size"),
@@ -166,6 +149,30 @@ def crypto_daily(conn, day_start, day_end, label):
             else:
                 e["pnl"] = None
         all_eps += eps
+    return all_eps
+
+
+def crypto_daily(conn, day_start, day_end, label):
+    lines = [f"DAILY CRYPTO SUMMARY - {label}", "=" * 60, ""]
+    thr = config.CRYPTO_GAP_THRESHOLD
+    rows = conn.execute(
+        "SELECT f.*, m.ticker, m.result FROM crypto_fv f JOIN markets m USING(market_id) "
+        "WHERE f.ts >= ? AND f.ts < ? ORDER BY f.market_id, f.ts",
+        (day_start, day_end),
+    ).fetchall()
+    gaps_text, gap_sec = _gaps_text(conn, ["crypto"], day_start, day_end)
+    n_markets = len({r["market_id"] for r in rows})
+    lines += [
+        "WHAT THIS COVERS",
+        f"Fair-value checks logged: {len(rows):,} across {n_markets} BTC/ETH markets.",
+        f"Time without data: {_dur(gap_sec) if gap_sec else 'none'}.",
+        gaps_text, "",
+    ]
+    if not rows:
+        lines.append("No crypto data was collected on this day.")
+        return "\n".join(lines)
+
+    all_eps = _gap_episodes(rows)
 
     lines += [f"GAPS OVER {thr * 100:.0f} CENTS AFTER FEES", ""]
     if not all_eps:
@@ -330,6 +337,84 @@ def _prop_key(m):
     return f"{m['league'] or m['sport']} - {m['stat_type']}"
 
 
+def _combo_type(legs):
+    """cross-game: every leg from a different game; same-game: all legs from one game; mixed: in between.
+
+    The game is identified by the event part of each leg's ticker (e.g. 26OCT03SYRCONN), which Kalshi
+    shares across a game's winner, spread, total and player-prop markets.
+    """
+    games = [leg["market"].split("-")[1] if leg["market"].count("-") >= 1 else leg["market"] for leg in legs]
+    distinct = len(set(games))
+    if distinct == len(games):
+        return "cross-game"
+    if distinct == 1:
+        return "same-game"
+    return "mixed"
+
+
+def _legs_bucket(n):
+    return "2 legs" if n <= 2 else "3-4 legs" if n <= 4 else "5-8 legs" if n <= 8 else "9+ legs"
+
+
+def _combo_rows(conn, start, end):
+    """Each sampled combo trade window with its legs' implied price (product of leg mids)."""
+    rows = conn.execute(
+        "SELECT ct.*, m.combo_detail, m.combo_legs, m.result FROM combo_trades ct "
+        "JOIN markets m USING(market_id) WHERE ct.window_end_ts >= ? AND ct.window_end_ts < ? "
+        "AND m.combo_detail IS NOT NULL", (start, end)).fetchall()
+    ids = {}
+    out = []
+    for r in rows:
+        legs = json.loads(r["combo_detail"])
+        implied = 1.0
+        for leg in legs:
+            t = leg["market"]
+            if t not in ids:
+                row = conn.execute("SELECT market_id FROM markets WHERE ticker=?", (t,)).fetchone()
+                ids[t] = row[0] if row else None
+            snap = ids[t] and conn.execute(
+                "SELECT bid_cc, ask_cc FROM scan_snapshots WHERE market_id=? AND ts <= ? "
+                "ORDER BY ts DESC LIMIT 1", (ids[t], r["window_end_ts"])).fetchone()
+            if not snap or snap["bid_cc"] is None or snap["ask_cc"] is None:
+                implied = None
+                break
+            p = (snap["bid_cc"] + snap["ask_cc"]) / 20000
+            implied *= p if leg.get("side") == "yes" else 1 - p
+        out.append({
+            "type": _combo_type(legs), "legs": _legs_bucket(r["combo_legs"] or len(legs)),
+            "trades": r["n_trades"], "contracts": r["contracts"] or 0.0, "price": r["vwap_yes"],
+            "implied": implied if implied is not None and implied >= 0.001 else None,
+            "won": None if r["result"] not in ("yes", "no") else (1.0 if r["result"] == "yes" else 0.0),
+        })
+    return out
+
+
+def _combo_stats(items):
+    priced = [x for x in items if x["implied"] and x["price"] is not None]
+    settled = [x for x in items if x["won"] is not None and x["price"] is not None]
+    c_priced = sum(x["contracts"] for x in priced)
+    c_settled = sum(x["contracts"] for x in settled)
+    paid = sum(x["contracts"] * x["price"] for x in settled)
+    return {
+        "trades": sum(x["trades"] for x in items),
+        "contracts": sum(x["contracts"] for x in items),
+        "n_priced": len(priced),
+        "median_ratio": _median([x["price"] / x["implied"] for x in priced]),
+        # Contract-weighted: total paid / total the legs imply, over the same trades.
+        "weighted_ratio": (sum(x["contracts"] * x["price"] for x in priced)
+                           / sum(x["contracts"] * x["implied"] for x in priced)) if c_priced else None,
+        "n_settled": len(settled),
+        "avg_paid": paid / c_settled if c_settled else None,
+        "win_rate": sum(x["contracts"] * x["won"] for x in settled) / c_settled if c_settled else None,
+        # Buyers' return per $1 staked, before Kalshi's fee on the combo.
+        "buyer_return": (sum(x["contracts"] * x["won"] for x in settled) / paid - 1) if paid else None,
+    }
+
+
+def _ratio(x):
+    return "n/a" if x is None else f"{x:.2f}x"
+
+
 def _combo_section(conn, start, end):
     lines = ["COMBOS (multi-leg parlays)", ""]
     s = conn.execute(
@@ -340,67 +425,262 @@ def _combo_section(conn, start, end):
         return lines + ["No combo trading data this week.", ""]
     lines += [
         f"Across {s['n']} scans: {s['trades']:,} combo trades, {s['contracts']:,.0f} contracts.",
-        "Combos have no standing order book on Kalshi (they are priced on request), so 'spread' does not "
-        "apply. Instead we compare each traded combo's price with what its legs imply.",
+        "Combos have no standing order book on Kalshi (market makers price each one on request), so "
+        "'spread' does not apply. Instead we compare each traded combo's price with the product of its "
+        "legs' Kalshi prices: the fair price if the legs were unrelated.",
     ]
     if s["trunc"]:
         lines.append(f"Note: on {s['trunc']} scans the trade feed was too busy to read in full; "
                      "those scans cover only the most recent trades.")
     lines.append("")
+
+    items = _combo_rows(conn, start, end)
+    if not items:
+        return lines + ["None of this week's sampled combos could be matched to their legs yet.", ""]
+    by_type = defaultdict(list)
+    for x in items:
+        by_type[x["type"]].append(x)
+    stats = {t: _combo_stats(v) for t, v in by_type.items()}
+    overall = _combo_stats(items)
+
+    cross = stats.get("cross-game")
+    lines.append("SUMMARY")
+    if cross and cross["weighted_ratio"]:
+        survive = None
+        if overall["weighted_ratio"] and overall["weighted_ratio"] > 1:
+            survive = (cross["weighted_ratio"] - 1) / (overall["weighted_ratio"] - 1)
+        lines.append(
+            f"- Cross-game combos (every leg from a different game, so the legs are close to unrelated): "
+            f"buyers paid {_ratio(cross['weighted_ratio'])} what the legs imply (contract-weighted; "
+            f"median combo {_ratio(cross['median_ratio'])}, {cross['n_priced']} combos).")
+        if survive is not None:
+            lines.append(f"- Across all combos the premium is {_ratio(overall['weighted_ratio'])}; "
+                         f"about {max(survive, 0) * 100:.0f}% of that premium is still there in cross-game "
+                         "combos, where correlation can't explain it.")
+    else:
+        lines.append("- Not enough cross-game combos matched to their legs yet.")
+    same = stats.get("same-game")
+    if same and same["weighted_ratio"]:
+        lines.append(f"- Same-game combos: {_ratio(same['weighted_ratio'])}. Their legs are related (a team "
+                     "winning and its quarterback throwing for 300 yards tend to happen together), so the "
+                     "product of leg prices understates their fair price and part of this is not premium.")
+    lines.append("")
+
+    def stat_rows(groups):
+        out = []
+        for key, st in groups:
+            out.append([*key, f"{st['trades']:,}", f"{st['contracts']:,.0f}", st["n_priced"],
+                        _ratio(st["median_ratio"]), _ratio(st["weighted_ratio"]),
+                        f"{st['avg_paid'] * 100:.1f}% / {st['win_rate'] * 100:.1f}% (n={st['n_settled']})"
+                        if st["n_settled"] else "pending",
+                        f"{st['buyer_return'] * 100:+.0f}%" if st["buyer_return"] is not None else "pending"])
+        return out
+
+    headers = ["Trades", "Contracts", "Combos priced", "Median vs legs", "Weighted vs legs",
+               "Avg price / won", "Buyer return per $1"]
+    order = ["cross-game", "mixed", "same-game"]
+    lines += ["By type:", _table(["Type"] + headers, stat_rows(
+        [((t,), stats[t]) for t in order if t in stats])), ""]
+    for t in order:
+        if t not in by_type:
+            continue
+        legs = defaultdict(list)
+        for x in by_type[t]:
+            legs[x["legs"]].append(x)
+        lines += [f"{t.capitalize()} combos by number of legs:", _table(["Legs"] + headers, stat_rows(
+            [((k,), _combo_stats(legs[k])) for k in ("2 legs", "3-4 legs", "5-8 legs", "9+ legs") if k in legs])), ""]
+    lines += [
+        "How to read this:",
+        "- 'vs legs' = combo price divided by the product of its legs' Kalshi mid prices. 1.00x = priced "
+        "exactly as unrelated legs imply; 1.30x = buyers paid 30% more.",
+        "- 'Mixed' combos have some legs from the same game and some from different games.",
+        "- 'Avg price / won' and 'Buyer return per $1' use settled combos only: if buyers pay 5.0% on "
+        "average but combos win 3.0% of the time, buyers lose about 40 cents per dollar. Kalshi's fee on "
+        "the combo comes on top. Treat these as noisy until there are several hundred settled combos, "
+        "because rare big wins swing them.",
+        "- Covers the most-traded combos sampled each scan; leg prices come from the nearest scan "
+        "(up to 20 minutes earlier).",
+        "",
+    ]
+    return lines
+
+
+TTC_BUCKETS = [(0, 900, "under 15 min"), (900, 1800, "15-30 min"), (1800, 3600, "30-60 min"),
+               (3600, 3 * 3600, "1-3 hours"), (3 * 3600, 8 * 3600, "3-8 hours"), (8 * 3600, 86400, "8-24 hours")]
+HOUR_BLOCKS = [(0, 4), (4, 8), (8, 12), (12, 16), (16, 20), (20, 24)]
+
+
+def _ttc_label(secs):
+    for lo, hi, label in TTC_BUCKETS:
+        if lo <= secs < hi:
+            return label
+    return None
+
+
+def _hour_label(ts):
+    h = datetime.fromtimestamp(ts).hour
+    for lo, hi in HOUR_BLOCKS:
+        if lo <= h < hi:
+            return f"{lo:02d}:00-{hi:02d}:00"
+
+
+def _implied_vol(r):
+    """The volatility at which our model reproduces Kalshi's mid price (above/below markets only)."""
+    if r["strike_type"] not in ("greater", "greater_or_equal") or not r["floor_strike"]:
+        return None
+    if r["yes_bid"] is None or r["yes_ask"] is None:
+        return None
+    target = (r["yes_bid"] + r["yes_ask"]) / 2
+    secs = r["seconds_to_close"] - 40
+    a = math.log(r["spot"] / r["floor_strike"])
+    if secs <= 0 or not 0.03 < target < 0.97 or abs(a) < 1e-4:
+        return None
+    tau = secs / volsurface.YEAR_SEC
+    f = lambda v: volsurface.prob_above(r["spot"], r["floor_strike"], v, tau) - target
+    lo = 0.005
+    # Above the strike, probability falls steadily as vol rises. Below it, probability rises then
+    # falls; we search only the rising part, which is the economically sensible answer.
+    hi = 5.0 if a > 0 else math.sqrt(2 * abs(a) / tau)
+    hi = max(min(hi, 5.0), lo * 2)
+    flo, fhi = f(lo), f(hi)
+    if flo * fhi > 0:
+        return None
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        fm = f(mid)
+        if (fm > 0) == (flo > 0):
+            lo, flo = mid, fm
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+def _actual_vol(conn, start, end):
+    """Volatility that actually happened, from our own logged spot prices, by hour block."""
+    pts = conn.execute(
+        "SELECT asset, ts, AVG(spot) spot FROM crypto_fv WHERE ts >= ? AND ts < ? GROUP BY asset, ts "
+        "ORDER BY asset, ts", (start, end)).fetchall()
+    acc = defaultdict(lambda: [0.0, 0.0])  # block -> [sum of squared returns, seconds]
+    prev = None
+    for p in pts:
+        if prev and prev["asset"] == p["asset"] and 0 < p["ts"] - prev["ts"] <= 300:
+            r = math.log(p["spot"] / prev["spot"])
+            for key in (_hour_label(p["ts"]), "all"):
+                acc[key][0] += r * r
+                acc[key][1] += p["ts"] - prev["ts"]
+        prev = p
+    return {k: math.sqrt(v[0] / v[1] * volsurface.YEAR_SEC) for k, v in acc.items() if v[1] > 3600}
+
+
+def crypto_weekly_section(conn, start, end):
+    lines = ["CRYPTO: ARE INTRADAY GAPS REAL, OR IS OUR VOLATILITY INPUT WRONG?", ""]
     rows = conn.execute(
-        "SELECT ct.*, m.combo_detail, m.combo_legs, m.league, m.result FROM combo_trades ct "
-        "JOIN markets m USING(market_id) WHERE ct.window_end_ts >= ? AND ct.window_end_ts < ? "
-        "AND m.combo_detail IS NOT NULL", (start, end)).fetchall()
-    ticker_ids = {}
-    groups = defaultdict(lambda: {"n": 0, "contracts": 0.0, "prem": [], "results": []})
-    for r in rows:
-        legs = json.loads(r["combo_detail"])
-        probs = []
-        for leg in legs:
-            t = leg["market"]
-            if t not in ticker_ids:
-                row = conn.execute("SELECT market_id FROM markets WHERE ticker=?", (t,)).fetchone()
-                ticker_ids[t] = row[0] if row else None
-            mid_id = ticker_ids[t]
-            snap = mid_id and conn.execute(
-                "SELECT bid_cc, ask_cc FROM scan_snapshots WHERE market_id=? AND ts <= ? "
-                "ORDER BY ts DESC LIMIT 1", (mid_id, r["window_end_ts"])).fetchone()
-            if not snap or snap["bid_cc"] is None or snap["ask_cc"] is None:
-                probs = None
-                break
-            p = (snap["bid_cc"] + snap["ask_cc"]) / 20000
-            probs.append(p if leg.get("side") == "yes" else 1 - p)
-        games = {leg["market"].split("-")[1] if "-" in leg["market"] else leg["market"] for leg in legs}
-        kind = "same-game" if len(games) < len(legs) else "multi-game"
-        nlegs = r["combo_legs"] or len(legs)
-        bucket = "2 legs" if nlegs <= 2 else "3-4 legs" if nlegs <= 4 else "5-8 legs" if nlegs <= 8 else "9+ legs"
-        g = groups[(kind, bucket)]
-        g["n"] += r["n_trades"]
-        g["contracts"] += r["contracts"]
-        if probs and r["vwap_yes"] is not None:
-            implied = 1.0
-            for p in probs:
-                implied *= p
-            if implied >= 0.001:
-                g["prem"].append(r["vwap_yes"] / implied)
-        if r["result"] in ("yes", "no") and r["vwap_yes"] is not None:
-            g["results"].append((r["vwap_yes"], 1.0 if r["result"] == "yes" else 0.0))
-    trows = []
-    for (kind, bucket), g in sorted(groups.items()):
-        res = g["results"]
-        trows.append([kind, bucket, g["n"], f"{g['contracts']:,.0f}",
-                      f"{_median(g['prem']):.2f}x (n={len(g['prem'])})" if g["prem"] else "n/a",
-                      f"{statistics.mean(p for p, _ in res) * 100:.1f}% vs {statistics.mean(o for _, o in res) * 100:.1f}% "
-                      f"(n={len(res)})" if res else "pending"])
-    lines += [_table(["Type", "Legs", "Trades", "Contracts", "Price vs legs' product",
-                      "Avg price paid vs how often it won"], trows), "",
-              "'Price vs legs' product': the combo's traded price divided by the product of each leg's Kalshi "
-              "mid price (median across combos). 1.00x means the combo was priced exactly as its legs imply; "
-              "1.30x means buyers paid 30% more. Same-game legs are related, so some difference is expected "
-              "there; multi-game combos should be near 1.00x if fairly priced. Covers the most-traded combos "
-              "sampled each scan.",
-              "'Avg price paid vs how often it won': if buyers pay 5.0% on average but combos win 3.0% of the "
-              "time, sellers have the edge.", ""]
+        "SELECT f.*, m.ticker, m.result, m.strike_type, m.floor_strike, m.cap_strike FROM crypto_fv f "
+        "JOIN markets m USING(market_id) WHERE f.ts >= ? AND f.ts < ? AND f.seconds_to_close < 86400 "
+        "ORDER BY f.market_id, f.ts", (start, end)).fetchall()
+    if not rows:
+        return lines + ["No intraday crypto data this week.", ""]
+    lines += [
+        "This looks only at BTC/ETH markets closing within 24 hours. Three tests separate a real "
+        "mispricing from a bad volatility input:",
+        "1. Accuracy (Brier score, lower is better) of three forecasts against actual outcomes: our fair "
+        "value with options volatility, the same model with recently measured volatility, and Kalshi's "
+        "own price. If Kalshi beats our options-vol fair value, the 'gap' was mostly our input being wrong.",
+        "2. 'Kalshi-implied vol' is the volatility that makes our model match Kalshi's price. We compare it "
+        "with the options vol we used and with the volatility that actually happened. If Kalshi's number "
+        "is closer to what happened, Kalshi had the better input.",
+        "3. 'Result if taken' is what you would actually have made per contract, after fees, by taking "
+        "every gap over 3c the moment it appeared. Positive and steady means a real pricing difference.",
+        "",
+    ]
+    eps = _gap_episodes(rows)
+    actual = _actual_vol(conn, start, end)
+
+    def summarize(keyfn, order, extra_actual=False):
+        groups = defaultdict(lambda: {"rows": [], "eps": []})
+        for r in rows:
+            k = keyfn(r)
+            if k:
+                groups[k]["rows"].append(r)
+        for e in eps:
+            k = keyfn(e["first"])
+            if k:
+                groups[k]["eps"].append(e)
+        out = []
+        for k in order:
+            if k not in groups:
+                continue
+            g = groups[k]
+            two = [r for r in g["rows"] if r["yes_bid"] is not None and r["yes_ask"] is not None]
+            res = [r for r in two if r["result"] in ("yes", "no")]
+            o = lambda r: 1.0 if r["result"] == "yes" else 0.0
+            b_iv = _brier([(r["fair_yes"], o(r)) for r in res])
+            b_rv = _brier([(r["fair_yes_realised"], o(r)) for r in res])
+            b_mk = _brier([((r["yes_bid"] + r["yes_ask"]) / 2, o(r)) for r in res])
+            pnls = [e["pnl"] for e in g["eps"] if e["pnl"] is not None]
+            row = [k, len(two), len(res),
+                   f"{b_iv:.3f}" if b_iv is not None else "n/a",
+                   f"{b_rv:.3f}" if b_rv is not None else "n/a",
+                   f"{b_mk:.3f}" if b_mk is not None else "n/a",
+                   _pct(_median([r["vol"] for r in two])),
+                   _pct(_median([r["vol_realised"] for r in two])),
+                   _pct(_median([_implied_vol(r) for r in two]))]
+            if extra_actual:
+                row.append(_pct(actual.get(k)))
+            row += [len(g["eps"]), f"{_c(statistics.mean(pnls))} (n={len(pnls)})" if pnls else "pending"]
+            out.append(row)
+        return out
+
+    base = ["Checks", "With result", "Brier: ours (options vol)", "Brier: ours (recent vol)",
+            "Brier: Kalshi", "Options vol", "Recent vol", "Kalshi-implied vol"]
+    tail = ["Gaps >3c", "Avg result if taken"]
+    lines += ["By time left until the market closes:",
+              _table(["Time to close"] + base + tail,
+                     summarize(lambda r: _ttc_label(r["seconds_to_close"]), [b[2] for b in TTC_BUCKETS])), ""]
+    lines += [f"By time of day (your computer's local time; check time, not close time). Volatility that "
+              f"actually happened over the whole week: {_pct(actual.get('all'))}.",
+              _table(["Time of day"] + base + ["Actual vol"] + tail,
+                     summarize(lambda r: _hour_label(r["ts"]), [f"{lo:02d}:00-{hi:02d}:00" for lo, hi in HOUR_BLOCKS],
+                               extra_actual=True)), ""]
+
+    # Plain-English verdict, only when there is enough data to say anything.
+    res_rows = [r for r in rows if r["result"] in ("yes", "no") and r["yes_bid"] is not None
+                and r["yes_ask"] is not None]
+    pnls = [e["pnl"] for e in eps if e["pnl"] is not None]
+    lines.append("What this suggests so far:")
+    if len({r["market_id"] for r in res_rows}) < 50 or len(pnls) < 30:
+        lines.append(f"- Not enough settled data yet to judge ({len({r['market_id'] for r in res_rows})} "
+                     f"intraday markets with results, {len(pnls)} settled gaps). Needs roughly 50+ markets "
+                     "and 30+ gaps.")
+    else:
+        o = lambda r: 1.0 if r["result"] == "yes" else 0.0
+        b_iv = _brier([(r["fair_yes"], o(r)) for r in res_rows])
+        b_mk = _brier([((r["yes_bid"] + r["yes_ask"]) / 2, o(r)) for r in res_rows])
+        avg_pnl = statistics.mean(pnls)
+        iv = _median([r["vol"] for r in res_rows])
+        kv = _median([_implied_vol(r) for r in res_rows])
+        act = actual.get("all")
+        if b_mk < b_iv:
+            lines.append(f"- Kalshi's prices forecast outcomes better than our options-vol fair value "
+                         f"({b_mk:.3f} vs {b_iv:.3f}).")
+        else:
+            lines.append(f"- Our options-vol fair value forecast outcomes at least as well as Kalshi "
+                         f"({b_iv:.3f} vs {b_mk:.3f}).")
+        if iv and kv and act:
+            closer = "Kalshi's" if abs(kv - act) < abs(iv - act) else "the options market's"
+            lines.append(f"- Volatility that actually happened was {_pct(act)}; options implied {_pct(iv)}, "
+                         f"Kalshi's prices implied {_pct(kv)}. {closer} estimate was closer.")
+        lines.append(f"- Taking every gap at first sight returned {_c(avg_pnl)} per contract after fees "
+                     f"on average (n={len(pnls)}).")
+        if b_mk < b_iv and avg_pnl <= 0:
+            lines.append("- Verdict: these gaps look like our volatility input being wrong for short "
+                         "horizons, not a real pricing difference.")
+        elif b_mk >= b_iv and avg_pnl > 0:
+            lines.append("- Verdict: these gaps look like a real pricing difference, not a model error.")
+        else:
+            lines.append("- Verdict: mixed signals; keep collecting and check the breakdowns above for "
+                         "where the gaps do and don't hold up.")
+    lines.append("")
     return lines
 
 
@@ -473,6 +753,7 @@ def scanner_weekly(conn, start, end, label):
               "Sports (excluding player props):", _move_table(by_sport, "League - type"), "",
               "Player props by sport/league and stat type:", _move_table(by_prop, "League - stat type", n=40), ""]
     lines += ["3. " + "\n".join(_combo_section(conn, start, end))]
+    lines += ["4. " + "\n".join(crypto_weekly_section(conn, start, end))]
     return "\n".join(lines)
 
 

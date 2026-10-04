@@ -18,8 +18,9 @@ Reports are written to the `reports` folder in plain English:
   how much you could have traded, what taking them would actually have returned, and how our
   fair values compared with what happened.
 - **Weekly scanner report**: which categories, series and player prop types have the widest spreads
-  among actively traded markets, which move the most for the amount traded, and how combos are
-  priced compared with their individual legs.
+  among actively traded markets, which move the most for the amount traded, how combos are
+  priced compared with their individual legs (split into same-game and cross-game combos), and a
+  crypto check of whether short-term gaps are real or a sign our volatility input is off.
 
 ## One-time setup (Windows)
 
