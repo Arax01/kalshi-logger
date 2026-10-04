@@ -15,7 +15,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-from . import config, db, results, volsurface
+from . import config, db, fees, results, volsurface
 
 log = logging.getLogger(__name__)
 
@@ -754,7 +754,125 @@ def scanner_weekly(conn, start, end, label):
               "Player props by sport/league and stat type:", _move_table(by_prop, "League - stat type", n=40), ""]
     lines += ["3. " + "\n".join(_combo_section(conn, start, end))]
     lines += ["4. " + "\n".join(crypto_weekly_section(conn, start, end))]
+    lines += ["5. " + "\n".join(longshot_section(conn, start, end))]
     return "\n".join(lines)
+
+
+# ---------- longshots ----------
+
+LONGSHOT_MAX_PRICE = 0.10
+LONGSHOT_BUCKETS = [(0.0, 0.015, "1c"), (0.015, 0.035, "2-3c"), (0.035, 0.065, "4-6c"), (0.065, 0.10, "7-9c")]
+
+
+def _wilson(wins, n, z=1.96):
+    """Rough 95% range for a win rate from n tries (Wilson interval)."""
+    if n == 0:
+        return None, None
+    p = wins / n
+    d = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / d
+    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return max(0.0, c - h), min(1.0, c + h)
+
+
+def _longshot_items(conn, start, end):
+    """One item per (market, side) that was offered under 10c: average price, fee, our fair value, outcome."""
+    sql = (
+        "SELECT x.market_id, x.fair_yes, x.yes_bid, x.yes_ask, x.bid_size, x.ask_size, x.seconds_to_close, "
+        "m.event_ticker, m.result, s.fee_type, s.fee_multiplier FROM {t} x JOIN markets m USING(market_id) "
+        "LEFT JOIN series s ON s.series_ticker = m.series_ticker WHERE x.ts >= ? AND x.ts < ? "
+        "AND (x.yes_ask < ? OR x.yes_bid > ?)")
+    acc = {}
+    for table in ("crypto_fv", "crypto_far"):
+        for r in conn.execute(sql.format(t=table), (start, end, LONGSHOT_MAX_PRICE, 1 - LONGSHOT_MAX_PRICE)):
+            sides = []
+            if r["yes_ask"] is not None and r["yes_ask"] < LONGSHOT_MAX_PRICE:
+                sides.append(("YES", r["yes_ask"], r["ask_size"], r["fair_yes"]))
+            if r["yes_bid"] is not None and 1 - r["yes_bid"] < LONGSHOT_MAX_PRICE:
+                sides.append(("NO", 1 - r["yes_bid"], r["bid_size"], 1 - r["fair_yes"]))
+            for side, price, size, fair in sides:
+                fee = fees.taker_fee_per_contract(price, size or 1, r["fee_type"] or "quadratic",
+                                                  r["fee_multiplier"] if r["fee_multiplier"] is not None else 1.0)
+                a = acc.setdefault((r["market_id"], side), {
+                    "side": side, "event": r["event_ticker"], "result": r["result"], "prices": [], "fees": [],
+                    "fairs": [], "intraday": r["seconds_to_close"] < 86400})
+                a["prices"].append(price)
+                a["fees"].append(fee or 0.0)
+                a["fairs"].append(fair)
+    items = []
+    for a in acc.values():
+        item = {"side": a["side"], "event": a["event"], "intraday": a["intraday"],
+                "price": statistics.mean(a["prices"]), "fee": statistics.mean(a["fees"]),
+                "fair": statistics.mean(a["fairs"]), "won": None}
+        if a["result"] in ("yes", "no"):
+            item["won"] = 1.0 if a["result"].upper() == a["side"] else 0.0
+        items.append(item)
+    return items
+
+
+def _longshot_row(label, items):
+    n = len(items)
+    wins = sum(x["won"] for x in items)
+    cost = sum(x["price"] + x["fee"] for x in items)
+    lo, hi = _wilson(wins, n)
+    return [label, n, len({x["event"] for x in items}),
+            f"{statistics.mean(x['price'] for x in items) * 100:.1f}c",
+            f"{statistics.mean(x['fair'] for x in items) * 100:.1f}%",
+            f"{wins / n * 100:.1f}% ({lo * 100:.1f}-{hi * 100:.1f}%)",
+            f"{(wins - cost) / cost * 100:+.0f}%"]
+
+
+def longshot_section(conn, start, end):
+    lines = ["LONGSHOTS: CRYPTO CONTRACTS PRICED UNDER 10 CENTS", ""]
+    items = _longshot_items(conn, start, end)
+    settled = [x for x in items if x["won"] is not None]
+    pending = len(items) - len(settled)
+    if not settled:
+        return lines + [f"No settled longshot contracts this week yet ({pending} still open).", ""]
+    n = len(settled)
+    wins = sum(x["won"] for x in settled)
+    cost = sum(x["price"] + x["fee"] for x in settled)
+    avg_price = statistics.mean(x["price"] for x in settled)
+    lines += [
+        "Longshot bias = cheap contracts winning less often than their price suggests, so buying them loses "
+        "money and selling them (buying the other side) earns it. Each BTC/ETH market counts once per side, "
+        "at the average price it was offered at while under 10c. A cheap YES means the price needs a big move "
+        "to reach the strike; a cheap NO means YES is nearly certain.",
+        "",
+        f"SUMMARY: {n:,} longshot contracts settled ({pending:,} still open). They cost {avg_price * 100:.1f}c on "
+        f"average and won {wins / n * 100:.1f}% of the time. Buying every one would have returned "
+        f"{(wins - cost) / cost * 100:+.0f}% per $1 after Kalshi's fees. Our model put their chance at "
+        f"{statistics.mean(x['fair'] for x in settled) * 100:.1f}%.",
+        "",
+    ]
+    headers = ["Group", "Contracts", "Events", "Avg price paid", "Our fair value", "Actually won (95% range)",
+               "Buyer return per $1 after fees"]
+    rows = []
+    for lo, hi, label in LONGSHOT_BUCKETS:
+        grp = [x for x in settled if lo <= x["price"] < hi]
+        if grp:
+            rows.append(_longshot_row(label, grp))
+    lines += ["By price:", _table(headers, rows), ""]
+    rows = []
+    for side in ("YES", "NO"):
+        for intraday, h in ((True, "closes within 24h"), (False, "closes later")):
+            grp = [x for x in settled if x["side"] == side and x["intraday"] == intraday]
+            if grp:
+                rows.append(_longshot_row(f"cheap {side}, {h}", grp))
+    lines += ["By side and horizon:", _table(headers, rows), ""]
+    lines += [
+        "How to read this:",
+        "- If 'Actually won' is below 'Avg price paid' (and the 95% range stays below it), longshots are "
+        "overpriced: a sign of longshot bias that favours the seller.",
+        "- 'Events' matters: strikes in the same event (same coin, same close time) tend to win or lose "
+        "together, so the evidence is closer to the number of events than the number of contracts. Expect "
+        "this to stay noisy until there are several hundred events.",
+        "- Fees use the full size shown at the price, as elsewhere. Buying a single contract can cost more, "
+        "because each order's fee rounds up to a whole cent.",
+        "- Far-away strikes are checked every 30 minutes, closer strikes every 2 minutes.",
+        "",
+    ]
+    return lines
 
 
 # ---------- scheduling ----------

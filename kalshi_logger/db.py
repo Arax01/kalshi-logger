@@ -178,6 +178,21 @@ CREATE TABLE IF NOT EXISTS game_snapshots (
 );
 CREATE INDEX IF NOT EXISTS game_snapshots_market ON game_snapshots(market_id, ts);
 
+-- Far-away crypto strikes (fair value under 2% or over 98%), every 30 minutes, for the longshot report.
+CREATE TABLE IF NOT EXISTS crypto_far (
+    ts INTEGER NOT NULL,
+    market_id INTEGER NOT NULL,
+    seconds_to_close INTEGER,
+    spot REAL,
+    vol REAL,
+    fair_yes REAL,
+    yes_bid REAL,
+    yes_ask REAL,
+    bid_size REAL,
+    ask_size REAL,
+    PRIMARY KEY (ts, market_id)
+) WITHOUT ROWID;
+
 CREATE TABLE IF NOT EXISTS games (
     milestone_id TEXT PRIMARY KEY,
     league TEXT,
