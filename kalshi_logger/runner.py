@@ -11,6 +11,9 @@ from . import config, db
 log = logging.getLogger("kalshi_logger")
 
 stop_event = threading.Event()
+HEARTBEAT_SEC = 60
+# Set at start-up from the previous run: when it was last known alive, and whether it stopped cleanly.
+_prev_run = {"end": None, "clean": True}
 _suspend_lock = threading.Lock()
 _last_suspend = {"start": None, "end": None}
 
@@ -59,6 +62,8 @@ def _gap_reason(gap_start, gap_end, process_start, last_error):
     if s and e and s < gap_end and e > gap_start:
         return "computer asleep"
     if process_start > gap_start:
+        if not _prev_run["clean"]:
+            return "logger was closed without stop.bat (window closed, crash or power loss)"
         return "logger not running (stopped, or computer off/asleep)"
     if last_error:
         return f"errors: {last_error[:200]}"
@@ -85,6 +90,10 @@ class Job:
             ).fetchone()
             last_ok = row["last_ok_ts"] if row else None
             last_error = row["last_error"] if row else None
+            if last_ok is None and _prev_run["end"]:
+                # This job never finished a run before the logger last stopped (e.g. it was killed
+                # during the first scan); measure the gap from when the previous run was last alive.
+                last_ok = _prev_run["end"]
             after_gap = bool(last_ok and started - last_ok > config.GAP_FACTOR * self.interval)
             try:
                 self.func(after_gap=after_gap)
@@ -155,24 +164,64 @@ def run(jobs):
         return 1
     db.init()
     process_start = time.time()
+    conn = db.connect()
+    run_id = _recover_previous_run(conn, int(process_start))
     log.info("Logger started (read-only). Database: %s", config.DB_PATH)
     threads = []
     for job in jobs:
         t = threading.Thread(target=job.loop, args=(process_start,), name=job.name, daemon=True)
         t.start()
         threads.append(t)
+    last_beat = 0.0
     try:
         while not stop_event.is_set():
+            if time.time() - last_beat >= HEARTBEAT_SEC:
+                last_beat = time.time()
+                conn.execute("UPDATE process_runs SET heartbeat_ts=? WHERE run_id=?", (int(last_beat), run_id))
+                conn.commit()
             sleep_until(time.time() + 5)
     except KeyboardInterrupt:
         stop_event.set()
     log.info("Stopping: waiting for jobs to finish their current step...")
     for t in threads:
         t.join(timeout=120)
+    conn.execute("UPDATE process_runs SET heartbeat_ts=?, ended_ts=?, clean=1 WHERE run_id=?",
+                 (int(time.time()), int(time.time()), run_id))
+    conn.commit()
     if config.STOP_FILE.exists():
         config.STOP_FILE.unlink()
     log.info("Logger stopped.")
     return 0
+
+
+def _recover_previous_run(conn, now):
+    """Tidy up after a previous run that was killed rather than stopped, and start a new run record.
+
+    SQLite keeps every committed write when a process is killed, so the data itself is safe. What a
+    kill leaves behind is bookkeeping: the run is never marked as ended, and a scan in progress is
+    left marked 'running'. Both are fixed here, and the time the previous run was last alive is
+    remembered so the downtime is recorded as a gap like any other.
+    """
+    prev = conn.execute("SELECT * FROM process_runs ORDER BY run_id DESC LIMIT 1").fetchone()
+    if prev:
+        _prev_run["end"] = prev["ended_ts"] or prev["heartbeat_ts"] or prev["started_ts"]
+        _prev_run["clean"] = bool(prev["clean"])
+        if prev["ended_ts"] is None:
+            conn.execute("UPDATE process_runs SET ended_ts=?, clean=0 WHERE run_id=?",
+                         (_prev_run["end"], prev["run_id"]))
+            log.info("The previous run was not stopped with stop.bat (last alive %s); "
+                     "its data is kept and the downtime will be recorded as a gap.",
+                     time.strftime("%Y-%m-%d %H:%M", time.localtime(_prev_run["end"])))
+    n = conn.execute(
+        "UPDATE scans SET status='interrupted', finished_ts=COALESCE("
+        "(SELECT MAX(ts) FROM scan_snapshots s WHERE s.scan_id=scans.scan_id), started_ts) "
+        "WHERE status='running'").rowcount
+    if n:
+        log.info("Marked %d unfinished scan(s) as interrupted", n)
+    run_id = conn.execute("INSERT INTO process_runs(started_ts, heartbeat_ts, clean) VALUES(?,?,0)",
+                          (now, now)).lastrowid
+    conn.commit()
+    return run_id
 
 
 def request_stop():

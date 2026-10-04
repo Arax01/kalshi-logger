@@ -29,7 +29,15 @@ def print_status():
     db.init()
     conn = db.connect()
     size = sum(p.stat().st_size for p in config.DB_PATH.parent.glob(config.DB_PATH.name + "*"))
-    print(f"Database: {config.DB_PATH} ({size / 1e6:,.0f} MB)\n")
+    print(f"Database: {config.DB_PATH} ({size / 1e6:,.0f} MB)")
+    runs = conn.execute("SELECT * FROM process_runs WHERE ended_ts IS NOT NULL ORDER BY run_id DESC").fetchall()
+    if runs:
+        last = runs[0]
+        how = "cleanly with stop.bat" if last["clean"] else "WITHOUT stop.bat (window closed, crash or power loss)"
+        unclean = sum(1 for r in runs if not r["clean"] and r["ended_ts"] > time.time() - 7 * 86400)
+        print(f"Last stopped {datetime.fromtimestamp(last['ended_ts']):%a %b %d %H:%M}, {how}. "
+              f"Stops without stop.bat in the last 7 days: {unclean} (the data is kept; downtime shows as a gap).")
+    print()
     print("Last successful run of each job:")
     for r in conn.execute("SELECT * FROM job_state ORDER BY job"):
         err = f"   last error: {r['last_error']}" if r["last_error"] else ""
