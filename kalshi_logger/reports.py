@@ -697,8 +697,24 @@ def scanner_weekly(conn, start, end, label):
               "Spread = best ask minus best bid for YES (the cost of crossing the market, in cents). "
               "Price movement = total up-and-down movement of the mid price.", ""]
     stats, meta = _market_stats(conn, start, end)
-    if not stats:
-        return "\n".join(lines + ["No scanner data was collected this week."])
+    if stats:
+        lines += _scanner_sections(stats, meta)
+    else:
+        lines += ["NOTE: THE SCANNER COLLECTED NO DATA THIS WEEK.",
+                  "Sections 1 and 2 (spreads and price movement) need scanner data and are skipped; section 3 "
+                  "(combos) also comes from the scanner. Sections 4-6 come from the crypto and in-game loggers, "
+                  "which run separately, so they are still included below. See the gaps listed above for why "
+                  "the scanner did not run.", ""]
+    lines += ["3. " + "\n".join(_combo_section(conn, start, end))]
+    lines += ["4. " + "\n".join(crypto_weekly_section(conn, start, end))]
+    lines += ["5. " + "\n".join(longshot_section(conn, start, end))]
+    lines += ["6. " + "\n".join(ingame_section(conn, start, end))]
+    return "\n".join(lines)
+
+
+def _scanner_sections(stats, meta):
+    """Summary plus sections 1-2 (spreads and price movement), which need scanner data."""
+    lines = []
 
     def cat_key(m):
         if m["market_group"] == "combo":
@@ -752,10 +768,39 @@ def scanner_weekly(conn, start, end, label):
               "By series (top 20):", _move_table(by_series, "Series"), "",
               "Sports (excluding player props):", _move_table(by_sport, "League - type"), "",
               "Player props by sport/league and stat type:", _move_table(by_prop, "League - stat type", n=40), ""]
-    lines += ["3. " + "\n".join(_combo_section(conn, start, end))]
-    lines += ["4. " + "\n".join(crypto_weekly_section(conn, start, end))]
-    lines += ["5. " + "\n".join(longshot_section(conn, start, end))]
-    return "\n".join(lines)
+    return lines
+
+
+def ingame_section(conn, start, end):
+    """Coverage of the in-game logger: what was collected, so gaps are visible. No analysis yet."""
+    lines = ["IN-GAME SPORTS LOGGING (what was collected; no analysis yet)", ""]
+    gaps_text, gap_sec = _gaps_text(conn, ["ingame"], start, end)
+    rows = conn.execute(
+        "SELECT g.league, g.milestone_id, g.ts, g.live_updated_ts, m.result FROM game_snapshots g "
+        "JOIN markets m USING(market_id) WHERE g.ts >= ? AND g.ts < ?", (start, end)).fetchall()
+    lines += [f"Time without in-game data: {_dur(gap_sec) if gap_sec else 'none'}.", gaps_text, ""]
+    if not rows:
+        return lines + ["No games in progress were logged this week.", ""]
+    by = defaultdict(lambda: {"games": defaultdict(list), "settled": set(), "lag": [], "rows": 0})
+    for r in rows:
+        b = by[r["league"]]
+        b["rows"] += 1
+        b["games"][r["milestone_id"]].append(r["ts"])
+        if r["result"] in ("yes", "no"):
+            b["settled"].add(r["milestone_id"])
+        if r["live_updated_ts"]:
+            b["lag"].append(r["ts"] - r["live_updated_ts"])
+    trows = []
+    for league, b in sorted(by.items(), key=lambda kv: -len(kv[1]["games"])):
+        mins = [(max(t) - min(t)) / 60 for t in b["games"].values()]
+        lag = _median(b["lag"])
+        trows.append([league, len(b["games"]), len(b["settled"]), f"{b['rows']:,}", f"{_median(mins):.0f} min",
+                      f"{lag:.0f} s" if lag is not None else "n/a"])
+    lines += [_table(["League", "Games logged", "With final result", "Price+score snapshots",
+                      "Typical minutes logged per game", "Typical score-feed age"], trows), "",
+              "'Score-feed age' is how old the score feed's last update was when we read it (a lower bound on "
+              "its delay; n/a when the feed doesn't report its update time, as for baseball).", ""]
+    return lines
 
 
 # ---------- longshots ----------

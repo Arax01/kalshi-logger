@@ -202,9 +202,24 @@ job hasn't succeeded for more than 2.5 times its interval, the period is written
 table with a reason:
 - **computer asleep:** detected when a 1-second wait suddenly takes minutes
 - **logger not running:** stopped, or the computer was off
+- **logger was closed without stop.bat:** the window was closed, or a crash or power cut
 - **errors:** for example, no internet
 
 Reports list gaps and never treat them as quiet markets.
+
+**If the logger is killed instead of stopped** (window closed, crash, power cut), the database is
+safe. SQLite keeps every write that was saved before the kill and discards half-finished ones;
+this was tested by killing the logger mid-scan, and the database passed SQLite's integrity check.
+At the next start, the logger tidies up after the killed run:
+- the run is marked as not stopped cleanly;
+- a scan that was in progress is marked `interrupted`, keeping the rows it had already saved;
+- each job's downtime becomes a gap with the reason above.
+
+The logger saves a heartbeat every minute, so a job that was killed before it ever finished a run
+still gets a gap, measured from the last heartbeat. Short interruptions follow the same rule as
+sleep: only downtime longer than 2.5 times a job's interval counts as a gap (about 5 minutes for
+crypto, 2.5 minutes for in-game, 50 minutes for the scanner). Price changes still record the time
+since the previous row, so nothing is misread. `status.bat` shows how the logger last stopped.
 
 ## The database (`data/kalshi.db`)
 
@@ -218,6 +233,7 @@ Reports list gaps and never treat them as quiet markets.
 | `crypto_far` | far-away crypto strike per 30 minutes: fair value, vol, quotes and sizes (for the longshot report) |
 | `games`, `game_snapshots` | game, and game-winner market per minute while the game is in progress |
 | `gaps` | period without data, with a reason |
+| `process_runs` | each time the logger ran: start, last heartbeat, end, and whether it was stopped cleanly |
 | `series` | Kalshi series: category, tags, fee type and multiplier |
 
 All times are Unix seconds (UTC).
