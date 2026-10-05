@@ -12,7 +12,8 @@ Method, fixed before looking at results:
 * Returns per $1 after fees for buying YES and buying NO at the traded price (taker fee), and
   separately for the taker (who crossed the spread, pays the taker fee) and the maker (who was resting,
   pays the maker fee if the series charges one), using the fee in effect at the time of the trade.
-* A "pattern" in the discovery data must have >= MIN_EVENTS events, a calibration gap whose 95% range
+* A "pattern" in the discovery data must have >= MIN_EVENTS events (also after discounting buckets that a
+  few heavily traded events dominate), a calibration gap whose 95% range
   excludes zero, and a positive return after fees for at least one side. Patterns are then checked on
   the holdout and broken down by quarter to see whether they are shrinking.
 """
@@ -123,8 +124,10 @@ class Acc:
         r = N / D
         var = sum((e[f"{name}_n"] - r * e[f"{name}_d"]) ** 2 for e in self.ev.values()) / (D * D)
         se = math.sqrt(var)
-        off = 0.0 if name == "gap" else 1.0
-        return r - off, r - off - 1.96 * se, r - off + 1.96 * se
+        if name == "gap":
+            return r, r - 1.96 * se, r + 1.96 * se
+        # Returns per $1 can't go below -100% (you can't lose more than you paid).
+        return r - 1, max(r - 1 - 1.96 * se, -1.0), r - 1 + 1.96 * se
 
     def avg_price(self):
         C = self.contracts()
@@ -134,9 +137,11 @@ class Acc:
         C = self.contracts()
         return sum(e["W"] for e in self.ev.values()) / C if C else None
 
-    def top_event_share(self):
-        C = self.contracts()
-        return max(e["C"] for e in self.ev.values()) / C if C else None
+    def effective_events(self):
+        """How many equally weighted events the contract weights are worth: (sum C)^2 / sum C^2.
+        Much lower than the raw count when a few heavily traded events dominate."""
+        sq = sum(e["C"] ** 2 for e in self.ev.values())
+        return self.contracts() ** 2 / sq if sq else 0.0
 
 
 # ---------- loading ----------
@@ -204,8 +209,9 @@ def thin_flag(acc, volumes):
     mv = _median(volumes)
     if mv is not None and mv < THIN_MARKET_VOLUME:
         reasons.append(f"thin markets (median {mv:,.0f} contracts)")
-    if acc.top_event_share() and acc.top_event_share() > 0.25:
-        reasons.append("one event >25% of contracts")
+    eff = acc.effective_events()
+    if acc.n_events() >= MIN_EVENTS and eff < MIN_EVENTS:
+        reasons.append(f"dominated by a few events (worth ~{eff:.0f} events)")
     return "; ".join(reasons)
 
 
@@ -248,7 +254,7 @@ def build(conn):
 def find_patterns(groups, vols):
     out = []
     for (split, cat, b), a in groups.items():
-        if split != "discovery" or a.n_events() < MIN_EVENTS:
+        if split != "discovery" or a.n_events() < MIN_EVENTS or a.effective_events() < MIN_EVENTS:
             continue
         gap, lo, hi = a.ratio("gap")
         if gap is None or (lo <= 0 <= hi):
@@ -295,7 +301,7 @@ def build_report(conn):
     for pt in patterns:
         h = groups.get(("holdout", pt["cat"], pt["bucket"]))
         pt["h"] = h
-        if h is None or h.n_events() < MIN_EVENTS:
+        if h is None or h.n_events() < MIN_EVENTS or h.effective_events() < MIN_EVENTS:
             pt["verdict"] = "not enough holdout data"
             continue
         hg, hlo, hhi = h.ratio("gap")
@@ -317,9 +323,12 @@ def build_report(conn):
         L.append(f"- {len(patterns)} category/price buckets looked mispriced in the discovery data and were profitable "
                  f"after fees on at least one side. {len(confirmed)} of them held up on the holdout.")
         for p in confirmed:
-            r = p["h"].ratio(p["best"])[0]
-            L.append(f"  * {p['cat']}, {LABELS[p['bucket']]}: {_side_label(p['best'])} returned {_pct(r)} per $1 "
-                     f"after fees on the holdout ({p['h'].n_events()} events){'; ' + p['thin'] if p['thin'] else ''}.")
+            h = p["h"]
+            side = "YES" if p["best"].startswith("yes") else "NO"
+            t, m = h.ratio(f"{side.lower()}_t")[0], h.ratio(f"{side.lower()}_m")[0]
+            L.append(f"  * {p['cat']}, {LABELS[p['bucket']]}: buying {side} returned {_pct(t)} per $1 as a taker and "
+                     f"{_pct(m)} as a resting maker, after fees, on the holdout ({h.n_events()} events)"
+                     f"{'; ' + p['thin'] if p['thin'] else ''}.")
         taker_ok = [p for p in confirmed if max(p["h"].ratio("yes_t")[0] or -1, p["h"].ratio("no_t")[0] or -1) > 0]
         maker_only = [p for p in confirmed if p not in taker_ok]
         if confirmed:
@@ -339,8 +348,9 @@ def build_report(conn):
           "the schedule in effect at the time and are rounded up to the cent per trade. A positive taker number "
           "means you could have captured it by simply buying; a positive maker number only means patient resting "
           "orders were rewarded.",
-          f"- 'Tradeable?' flags fewer than {MIN_EVENTS} events, markets whose median lifetime volume is under "
-          f"{THIN_MARKET_VOLUME:,} contracts, or one event making up over a quarter of the contracts.",
+          f"- 'Tradeable?' flags fewer than {MIN_EVENTS} events; markets whose median lifetime volume is under "
+          f"{THIN_MARKET_VOLUME:,} contracts; or buckets where a few heavily traded events carry most of the "
+          f"contracts, so the result is worth fewer than {MIN_EVENTS} independent events.",
           "- The sample takes the same number of windows from every month, so 2025 is over-represented relative "
           "to its (much lower) real volume. That is deliberate: it gives older periods enough data to compare.",
           ""]
