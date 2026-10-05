@@ -285,6 +285,35 @@ They are tested only on trades from October 6, 2026. Run `calibration_rerun.bat`
 15, 2027 (first look) and again on or after July 15, 2027 (final look). Before the first look date
 the re-test report shows only how much fresh data has accumulated, never results.
 
+## Resting-order study
+
+`resting_orders.bat` asks: the calibration study says some prices are cheap for a resting (maker)
+order, but would a ~$100 resting order actually get filled, and are the fills you get the bad ones?
+It writes `reports/resting_orders.txt`. It places no orders; it replays history.
+
+**Which orders.** About 350 moments per group are drawn at random from the calibration study's
+sampled trades (at most 3 per market, fixed seed):
+- Entertainment and Mentions: a NO bid at the best NO bid when NO costs 30-60c;
+- Crypto, as a comparison: a YES bid at the best YES bid when YES costs 95-99c.
+Combos are left out. Each order is about $100 (contracts = $100 / price).
+
+**Did it fill.** Kalshi's 1-minute prices give the best bid and ask at that moment. Kalshi's public
+trade history then decides the fill: our order fills only after the contracts already waiting at
+that price (the queue) have traded, and a trade at a worse price means everything at ours was used up.
+The real queue is never visible, so three cases are shown: front (nobody ahead, optimistic),
+typical (median logged size at the best price) and long (90th percentile, pessimistic). The sizes
+come from the logger's own snapshots (order books, scans, crypto checks); before there are any, it uses
+the sizes measured in October 2026. Results are shown for three waits: 5 minutes, 1 hour, and until
+the market closes (unfilled orders are cancelled and cost nothing).
+
+**What it reports.** Fill rate; typical wait to the first fill; return per $1 on the filled
+contracts at settlement after the maker fee then in effect (with event-clustered 95% ranges); the
+same orders as if every one had filled instantly (the gap between the two is the adverse-selection
+cost); expected profit per $100 order placed, counting unfilled orders as zero; and how the price
+moved 5 and 30 minutes after a fill.
+
+Its tables (`rest_points`, `rest_tape`, `rest_tape_done`) are separate. The pull can be stopped and resumed.
+
 ## Data gaps
 
 Each job (scanner, crypto, in-game, results, reports) records the time of its last success. If a

@@ -255,5 +255,62 @@ class BooksTests(unittest.TestCase):
         self.assertEqual(top_levels([], 2), [None] * 4)
 
 
+class RestingOrderTests(unittest.TestCase):
+    # A NO bid at 40c (= YES ask 60c), $100 order -> 250 contracts.
+    P = {"side": "no", "yes_bid": 0.55, "yes_ask": 0.60, "t": 1000, "close_ts": 100000}
+
+    @staticmethod
+    def _tr(ts, price, count, taker="yes"):
+        return {"ts": ts, "yes_price": price, "count": count, "taker_side": taker}
+
+    def test_queue_ahead_fills_first(self):
+        from kalshi_logger.rest_study import simulate
+        trades = [self._tr(1100, 0.60, 80), self._tr(1200, 0.60, 70)]
+        self.assertEqual(simulate(self.P, trades, 0, None)["filled"], 150)
+        sim = simulate(self.P, trades, 100, None)
+        self.assertEqual(sim["filled"], 50)       # 150 traded, 100 were ahead of us
+        self.assertEqual(sim["first"], 1200)
+        self.assertEqual(simulate(self.P, trades, 200, None)["filled"], 0)
+
+    def test_wrong_side_and_other_prices_dont_fill(self):
+        from kalshi_logger.rest_study import simulate
+        trades = [self._tr(1100, 0.60, 500, taker="no"), self._tr(1200, 0.58, 500)]
+        self.assertEqual(simulate(self.P, trades, 0, None)["filled"], 0)
+
+    def test_trade_through_our_price_fills_everything(self):
+        from kalshi_logger.rest_study import simulate
+        sim = simulate(self.P, [self._tr(1100, 0.62, 1)], 5000, None)
+        self.assertEqual(sim["size"], 250)
+        self.assertEqual(sim["filled"], 250)
+
+    def test_wait_cutoff_and_trades_before_the_order(self):
+        from kalshi_logger.rest_study import simulate
+        trades = [self._tr(900, 0.60, 500), self._tr(1000 + 301, 0.60, 500)]
+        self.assertEqual(simulate(self.P, trades, 0, 300)["filled"], 0)
+        self.assertEqual(simulate(self.P, trades, 0, 3600)["filled"], 250)
+
+    def test_yes_bid_side(self):
+        from kalshi_logger.rest_study import simulate
+        p = {"side": "yes", "yes_bid": 0.96, "yes_ask": 0.97, "t": 0, "close_ts": 1000}
+        sim = simulate(p, [self._tr(10, 0.96, 50, taker="no"), self._tr(20, 0.96, 50, taker="yes")], 0, None)
+        self.assertEqual(sim["size"], 104)
+        self.assertEqual(sim["filled"], 50)
+
+    def test_price_range_flips_for_no(self):
+        from kalshi_logger.rest_study import _in_range
+        self.assertTrue(_in_range(0.40, 0.40, 0.70, "no"))
+        self.assertFalse(_in_range(0.65, 0.40, 0.70, "no"))
+        self.assertTrue(_in_range(0.99, 0.95, 0.995, "yes"))
+
+    def test_queue_sizes_fall_back_without_logged_data(self):
+        import sqlite3
+        from kalshi_logger import db, rest_study
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(db.SCHEMA.replace("PRAGMA journal_mode=WAL;", ""))
+        q = rest_study.queue_sizes(conn)
+        self.assertEqual(q["Mentions (NO 30-60c)"][:2], rest_study.DEFAULT_QUEUE["Mentions (NO 30-60c)"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,7 @@
     python -m kalshi_logger overreaction   rewrite the overreaction report from backfilled data
     python -m kalshi_logger calibration    sample historical trades (resumable), then write the calibration study
     python -m kalshi_logger calibration --rerun   pre-registered clean re-test (see docs/preregistration-...)
+    python -m kalshi_logger resting    resting-order study (replays history; needs calibration first)
 """
 import sys
 
@@ -78,6 +79,15 @@ def main(argv):
             print("stopped and restarted; it picks up where it left off.")
             calib_pull.run(db.connect())
         print("Wrote", calib_report.write_report(db.connect()))
+        return 0
+    if cmd == "resting":
+        runner.setup_logging(console=False)
+        from . import db, rest_study
+        db.init()
+        if "--report-only" not in argv:
+            print("Replaying Kalshi trade history for imagined resting orders (read-only, resumable)...")
+            rest_study.pull(db.connect())
+        print("Wrote", rest_study.write_report(db.connect()))
         return 0
     if cmd == "once":
         runner.setup_logging()
