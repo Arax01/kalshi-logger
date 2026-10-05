@@ -224,5 +224,27 @@ class CalibrationTests(unittest.TestCase):
         self.assertAlmostEqual(a.ratio("gap")[0], 0.70)  # won (1.0) minus price (0.30)
 
 
+class RerunTests(unittest.TestCase):
+    def test_results_hidden_before_first_look(self):
+        import calendar
+        import sqlite3
+        from kalshi_logger import calib_rerun, db
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(db.SCHEMA.replace("PRAGMA journal_mode=WAL;", ""))
+        before = calib_rerun.build_report(conn, now=calendar.timegm((2027, 1, 14, 0, 0, 0)))
+        self.assertIn("results hidden until the first look", before)
+        after = calib_rerun.build_report(conn, now=calendar.timegm((2027, 1, 16, 0, 0, 0)))
+        self.assertNotIn("results hidden", after)
+        self.assertIn("NOT YET TESTABLE", after)
+
+    def test_fresh_months_are_complete_months_from_oct_6(self):
+        import calendar
+        from kalshi_logger import calib_rerun
+        months = calib_rerun._complete_months(calendar.timegm((2027, 1, 15, 0, 0, 0)))
+        self.assertEqual([m for m, _, _ in months], ["2026-10", "2026-11", "2026-12"])
+        self.assertEqual(months[0][1], calib_rerun.CLEAN_START)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -270,10 +270,11 @@ Section 6 of the report shows what is confirmed under the rules as first written
 change. The three patterns confirmed under the current rules are confirmed under every rule set.
 The extra ones under the original rules rest on very few independent events.
 
-**A clean re-test.** The honest fix is data nobody has looked at. With the rules frozen as they are
-now, move `HOLDOUT_START` in `kalshi_logger/calib_report.py` to October 6, 2026, and run
-`calibration.bat` again in a few months (for example January 2027). Trades from October 6 onward
-then form a fresh test set.
+**A clean re-test (pre-registered).** The rules are frozen and four hypotheses are named in
+advance in `docs/preregistration-calibration-rerun.md`. One of them is Combos 90-95c YES as a taker.
+They are tested only on trades from October 6, 2026. Run `calibration_rerun.bat` on or after January
+15, 2027 (first look) and again on or after July 15, 2027 (final look). Before the first look date
+the re-test report shows only how much fresh data has accumulated, never results.
 
 ## Data gaps
 

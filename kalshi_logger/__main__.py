@@ -8,6 +8,7 @@
     python -m kalshi_logger backfill   download 2026 football games, then write the overreaction report
     python -m kalshi_logger overreaction   rewrite the overreaction report from backfilled data
     python -m kalshi_logger calibration    sample historical trades (resumable), then write the calibration study
+    python -m kalshi_logger calibration --rerun   pre-registered clean re-test (see docs/preregistration-...)
 """
 import sys
 
@@ -64,6 +65,13 @@ def main(argv):
         runner.setup_logging(console=False)
         from . import calib_pull, calib_report, db
         db.init()
+        if "--rerun" in argv:
+            from . import calib_rerun
+            if "--report-only" not in argv:
+                print("Extending the sample with fresh trades from October 6, 2026 (read-only, resumable)...")
+                calib_rerun.pull(db.connect())
+            print("Wrote", calib_rerun.write_report(db.connect()))
+            return 0
         if "--report-only" not in argv:
             print("Sampling historical Kalshi trades (read-only). This takes 1.5-2 hours the first time and can be")
             print("stopped and restarted; it picks up where it left off.")

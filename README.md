@@ -51,6 +51,7 @@ Double-click these files in the project folder:
 | `status.bat` | Shows whether it is running, what it has collected, and any gaps in the data. |
 | `report.bat` | Writes any reports that are due, plus a preview of the latest data, and opens the reports folder. |
 | `calibration.bat` | One time (about 1.5-2 hours, ~250 MB): samples historical Kalshi trades and writes the calibration study. Can be stopped and restarted. |
+| `calibration_rerun.bat` | The pre-registered clean re-test of the calibration study. Run on or after January 15, 2027, and again on or after July 15, 2027. |
 | `backfill.bat` | One time (about 20-30 min): downloads this season's NFL and college football games from Kalshi and writes the football overreaction report. Re-run it later to add newer games. |
 
 **To start it automatically when you log in:** press `Windows key + R`, type `shell:startup`,

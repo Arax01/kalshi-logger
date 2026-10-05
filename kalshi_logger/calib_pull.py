@@ -113,8 +113,9 @@ def _store_trades(conn, window_id, trades):
     return len(rows)
 
 
-def fetch_windows(conn, cut_trades, progress):
-    todo = conn.execute("SELECT * FROM calib_windows WHERE done=0 AND source='random' ORDER BY start_ts").fetchall()
+def fetch_windows(conn, cut_trades, progress, source="random"):
+    todo = conn.execute("SELECT * FROM calib_windows WHERE done=0 AND source=? ORDER BY start_ts",
+                        (source,)).fetchall()
     progress(f"Downloading {len(todo)} trade windows...")
     t0 = time.time()
     for i, w in enumerate(todo, 1):

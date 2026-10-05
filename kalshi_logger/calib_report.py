@@ -115,7 +115,7 @@ class Acc:
     def contracts(self):
         return sum(e["C"] for e in self.ev.values())
 
-    def ratio(self, name):
+    def ratio(self, name, z=1.96):
         """Returns (value, low, high). For gap: per-contract difference; for others: return per $1."""
         N = sum(e[f"{name}_n"] for e in self.ev.values())
         D = sum(e[f"{name}_d"] for e in self.ev.values())
@@ -125,9 +125,9 @@ class Acc:
         var = sum((e[f"{name}_n"] - r * e[f"{name}_d"]) ** 2 for e in self.ev.values()) / (D * D)
         se = math.sqrt(var)
         if name == "gap":
-            return r, r - 1.96 * se, r + 1.96 * se
+            return r, r - z * se, r + z * se
         # Returns per $1 can't go below -100% (you can't lose more than you paid).
-        return r - 1, max(r - 1 - 1.96 * se, -1.0), r - 1 + 1.96 * se
+        return r - 1, max(r - 1 - z * se, -1.0), r - 1 + z * se
 
     def avg_price(self):
         C = self.contracts()
@@ -155,13 +155,17 @@ def _quarter(ts):
     return f"{d.year} Q{(d.month - 1) // 3 + 1}"
 
 
-def load(conn):
-    """Yield one dict per usable trade (market settled YES or NO)."""
+def load(conn, max_ts=None):
+    """Yield one dict per usable trade (market settled YES or NO), optionally only trades before max_ts."""
     book = FeeBook(conn)
     sql = ("SELECT t.ticker, t.ts, t.yes_price, t.count, t.taker_side, w.source, m.event_ticker, m.series_ticker, "
            "m.category, m.result, m.volume FROM calib_trades t JOIN calib_markets m ON m.ticker=t.ticker "
            "JOIN calib_windows w ON w.window_id=t.window_id WHERE m.result IN ('yes','no')")
-    for r in conn.execute(sql):
+    params = ()
+    if max_ts is not None:
+        sql += " AND t.ts < ?"
+        params = (max_ts,)
+    for r in conn.execute(sql, params):
         p = r["yes_price"]
         if not 0 < p < 1:
             continue
@@ -232,12 +236,12 @@ BUCKET_HEADERS = ["Price", "Trades", "Contracts", "Events", "Avg price paid", "Y
                   "YES taker", "NO taker", "YES maker", "NO maker", "Tradeable?"]
 
 
-def build(conn):
+def build(conn, max_ts=None):
     groups = {}          # (split, cat, bucket) -> Acc
     vols = defaultdict(list)
     quarters = {}        # (cat, bucket, quarter) -> Acc
     sources = defaultdict(int)
-    for t in load(conn):
+    for t in load(conn, max_ts):
         key = (t["split"], t["cat"], t["bucket"])
         if key not in groups:
             groups[key] = Acc()
