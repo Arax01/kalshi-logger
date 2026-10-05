@@ -264,6 +264,47 @@ CREATE TABLE IF NOT EXISTS bf_minutes (
     PRIMARY KEY (ticker, minute_ts)
 ) WITHOUT ROWID;
 
+-- ===== Calibration study (sampled historical trades; separate from live logging) =====
+CREATE TABLE IF NOT EXISTS calib_windows (
+    window_id INTEGER PRIMARY KEY,
+    month TEXT,             -- YYYY-MM
+    start_ts INTEGER,
+    length_sec INTEGER,
+    source TEXT,            -- 'random' (time sample) or 'topup:<category>'
+    n_trades INTEGER,
+    full INTEGER,           -- 1 if the window had more trades than one page (we kept the newest 1000)
+    done INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS calib_trades (
+    window_id INTEGER NOT NULL,
+    ticker TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    yes_price REAL NOT NULL, -- dollars
+    count REAL NOT NULL,     -- contracts
+    taker_side TEXT          -- 'yes' (taker bought YES) or 'no' (taker bought NO)
+);
+CREATE INDEX IF NOT EXISTS calib_trades_ticker ON calib_trades(ticker);
+
+CREATE TABLE IF NOT EXISTS calib_markets (
+    ticker TEXT PRIMARY KEY,
+    event_ticker TEXT,
+    series_ticker TEXT,
+    category TEXT,          -- report category (player props, game winners, combos, crypto, ...)
+    status TEXT,
+    result TEXT,            -- yes / no / other; NULL if not found
+    close_ts INTEGER,
+    volume REAL,            -- lifetime contracts traded in this market (to judge whether it's tradeable)
+    looked_up INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS calib_fee_changes (
+    series_ticker TEXT,
+    scheduled_ts INTEGER,
+    fee_type TEXT,
+    fee_multiplier REAL
+);
+
 -- Each time the logger runs: start, last heartbeat (every minute), end, and whether it stopped
 -- cleanly (stop.bat) or was killed (window closed, crash, power loss).
 CREATE TABLE IF NOT EXISTS process_runs (

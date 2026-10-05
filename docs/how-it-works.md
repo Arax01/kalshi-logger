@@ -229,6 +229,52 @@ It writes `reports/football_overreaction.txt`. The method:
   Eastern), then applied unchanged to games on or after that date.
 - **Preseason:** NFL preseason is kept out of both and reported separately.
 
+## Calibration study
+
+`calibration.bat` asks: across Kalshi, do contracts priced at X cents win X% of the time, and where
+are they off by more than fees? It writes `reports/calibration_study.txt`.
+
+**The sample.**
+- **Random windows:** January 2025 to now, 150 random time windows per month, each sized for about
+  1,000 trades. Windows are longer in quiet months, so 2025 isn't drowned out by 2026. The windows are
+  fixed by a seed, so re-running picks the same ones.
+- **Results:** for every sampled trade's market, its final result, event, category and lifetime volume.
+- **Thin-category top-up:** any category with fewer than 200 settled events gets extra events sampled
+  directly from its series, with their trades.
+- **Fee history:** Kalshi's record of when each series' fees changed, so every trade gets the fee in
+  effect at the time.
+
+Everything goes into separate `calib_` tables. The pull can be stopped and resumed.
+
+**The analysis:**
+- **Buckets:** trades are bucketed by YES price (1-5c, 5-10c, 10-20c ... 90-95c, 95-99c). Each bucket
+  shows average price paid against how often YES actually won, weighted by contracts.
+- **Events, not contracts:** confidence ranges count each event once, since strikes in the same event
+  win or lose together. Both event and contract counts are shown.
+- **Returns per $1 after fees, four ways:** YES or NO, each bought by a taker (crossed the spread, paid
+  the taker fee) or by a resting maker order (paid the maker fee, which most series don't charge).
+  A pattern is only capturable as a taker if the taker number is positive.
+- **Holdout:** patterns are looked for only in trades before July 1, 2026, then checked once on trades
+  from July 1, 2026 on.
+- **Edge decay:** each pattern is broken down by quarter, to see whether it shrank as volume grew.
+- **Tradeability flag:** a bucket is flagged if it has fewer than 30 events, if its markets' median
+  lifetime volume is under 1,000 contracts, or if one event makes up over a quarter of its contracts.
+
+**The holdout is not clean.** While building the report, results that included post-cutoff trades
+were seen before three rules were finalised:
+- the 'effective events' discount;
+- a pattern's side must match the direction of the price gap;
+- 'capturable as a taker' needs the taker return's range above zero.
+
+Section 6 of the report shows what is confirmed under the rules as first written and under each
+change. The three patterns confirmed under the current rules are confirmed under every rule set.
+The extra ones under the original rules rest on very few independent events.
+
+**A clean re-test.** The honest fix is data nobody has looked at. With the rules frozen as they are
+now, move `HOLDOUT_START` in `kalshi_logger/calib_report.py` to October 6, 2026, and run
+`calibration.bat` again in a few months (for example January 2027). Trades from October 6 onward
+then form a fresh test set.
+
 ## Data gaps
 
 Each job (scanner, crypto, in-game, results, reports) records the time of its last success. If a

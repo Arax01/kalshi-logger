@@ -7,6 +7,7 @@
     python -m kalshi_logger once JOB   run one job once (scanner, crypto, ingame, results)
     python -m kalshi_logger backfill   download 2026 football games, then write the overreaction report
     python -m kalshi_logger overreaction   rewrite the overreaction report from backfilled data
+    python -m kalshi_logger calibration    sample historical trades (resumable), then write the calibration study
 """
 import sys
 
@@ -58,6 +59,16 @@ def main(argv):
             backfill.run()
         path = overreaction.write_report(db.connect())
         print("Wrote", path)
+        return 0
+    if cmd == "calibration":
+        runner.setup_logging(console=False)
+        from . import calib_pull, calib_report, db
+        db.init()
+        if "--report-only" not in argv:
+            print("Sampling historical Kalshi trades (read-only). This takes 1.5-2 hours the first time and can be")
+            print("stopped and restarted; it picks up where it left off.")
+            calib_pull.run(db.connect())
+        print("Wrote", calib_report.write_report(db.connect()))
         return 0
     if cmd == "once":
         runner.setup_logging()
