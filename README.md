@@ -71,8 +71,9 @@ is still the tidier way to stop it.
 
 ## Where things are kept
 
-- `data\kalshi.db` is all the recorded data, in one SQLite database file. Expect up to about 100 MB a day
-  on busy sports days, less on quiet days (roughly 1.5-3 GB a month). To start over, stop the logger and delete the `data`
+- `data\kalshi.db` is all the recorded data, in one SQLite database file. Expect up to about 110 MB a day
+  on busy sports days, less on quiet days (roughly 1.7-3.3 GB a month). That includes about 5-10 MB a day
+  of order-book snapshots for Entertainment and Mentions markets. To start over, stop the logger and delete the `data`
   folder.
 - `reports\` holds the reports. `logs\` holds a technical log, useful if something goes wrong.
 - None of these are uploaded anywhere or saved to GitHub.

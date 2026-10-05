@@ -206,6 +206,17 @@ CREATE TABLE IF NOT EXISTS games (
     updated_ts INTEGER
 );
 
+-- Order-book snapshots (top 3 levels each side) for Entertainment and Mentions markets with volume.
+-- yb = YES bids, nb = NO bids; level 1 is the best price. Prices in centi-cents (1 = $0.0001).
+-- A NO bid at q is a YES ask at 1 - q. Written only when the levels change, or hourly.
+CREATE TABLE IF NOT EXISTS book_snapshots (
+    market_id INTEGER NOT NULL,
+    ts INTEGER NOT NULL,
+    yb1_cc INTEGER, yb1_size REAL, yb2_cc INTEGER, yb2_size REAL, yb3_cc INTEGER, yb3_size REAL,
+    nb1_cc INTEGER, nb1_size REAL, nb2_cc INTEGER, nb2_size REAL, nb3_cc INTEGER, nb3_size REAL,
+    PRIMARY KEY (market_id, ts)
+) WITHOUT ROWID;
+
 -- ===== Backfilled football data (one-time historical pull; separate from live logging) =====
 -- Games found for the backfill and how far each one got.
 CREATE TABLE IF NOT EXISTS bf_games (

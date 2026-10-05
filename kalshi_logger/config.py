@@ -74,3 +74,11 @@ CRYPTO_GAP_THRESHOLD = _float("CRYPTO_GAP_THRESHOLD", 0.03)
 MEANINGFUL_WEEKLY_VOLUME = _int("MEANINGFUL_WEEKLY_VOLUME", 500)
 
 USER_AGENT = "kalshi-logger/1.0 (read-only research)"
+
+# Order-book snapshots (books job): which markets, how often, how deep.
+BOOKS_INTERVAL_SEC = _int("BOOKS_INTERVAL_SEC", 180)
+BOOKS_CATEGORIES = [x.strip() for x in os.environ.get("BOOKS_CATEGORIES", "Entertainment,Mentions").split(",")
+                    if x.strip()]
+BOOKS_MIN_VOLUME_24H = _int("BOOKS_MIN_VOLUME_24H", 100)
+BOOKS_MAX_MARKETS = _int("BOOKS_MAX_MARKETS", 1000)
+BOOKS_LEVELS = 3   # fixed: the table has columns for 3 levels per side

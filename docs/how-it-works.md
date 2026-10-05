@@ -88,6 +88,15 @@ In practice it means:
 Quoters may also pay a maker fee: Kalshi's changelog describes a 0.5 maker-fee multiplier for
 combo quoters in some cases. This logger does none of that; it only reads public data.
 
+**Order-book snapshots (books job).** Every 3 minutes, for each open Entertainment or Mentions market
+that traded at least 100 contracts in the last 24 hours (about 750-850 markets), the logger stores
+the top 3 price levels on each side: YES bids and NO bids, with the contracts at each. A NO bid at q
+is a YES ask at 1 - q.
+- **Request rate:** one public request covers 100 markets, so this is about 0.05 requests per second.
+- **Storage:** a row is written only when those levels change, or hourly. In testing about 17% of
+  books changed in each 3-minute round, so this is about 5 MB a day (up to about 10 MB on busy days).
+- **Purpose:** this data narrows the queue assumption in the resting-order study.
+
 ## Priority 2: crypto fair value
 
 **Markets covered:** BTC and ETH above/below (hourly, daily, weekly), ranges, 15-minute up/down,
@@ -313,6 +322,7 @@ since the previous row, so nothing is misread. `status.bat` shows how the logger
 | `crypto_fv` | crypto market per check: spot prices, vol and how it was derived, fair value, audit fair value, quotes, sizes, fees, gaps |
 | `crypto_far` | far-away crypto strike per 30 minutes: fair value, vol, quotes and sizes (for the longshot report) |
 | `games`, `game_snapshots` | game, and game-winner market per minute while the game is in progress |
+| `book_snapshots` | Entertainment/Mentions market per change: top 3 YES and NO bids with sizes |
 | `gaps` | period without data, with a reason |
 | `process_runs` | each time the logger ran: start, last heartbeat, end, and whether it was stopped cleanly |
 | `series` | Kalshi series: category, tags, fee type and multiplier |

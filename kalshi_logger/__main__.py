@@ -4,7 +4,7 @@
     python -m kalshi_logger stop       ask a running logger to stop (what stop.bat does)
     python -m kalshi_logger status     show what has been collected and any data gaps
     python -m kalshi_logger report     write any due reports, plus a preview of the latest data
-    python -m kalshi_logger once JOB   run one job once (scanner, crypto, ingame, results)
+    python -m kalshi_logger once JOB   run one job once (scanner, crypto, ingame, results, books)
     python -m kalshi_logger backfill   download 2026 football games, then write the overreaction report
     python -m kalshi_logger overreaction   rewrite the overreaction report from backfilled data
     python -m kalshi_logger calibration    sample historical trades (resumable), then write the calibration study
@@ -16,7 +16,7 @@ from . import config
 
 
 def build_jobs():
-    from . import crypto, ingame, reports, results, scanner
+    from . import books, crypto, ingame, reports, results, scanner
     from .runner import Job
     return [
         Job("scanner", config.SCAN_INTERVAL_SEC, scanner.run_scan),
@@ -24,6 +24,7 @@ def build_jobs():
         Job("ingame", config.INGAME_INTERVAL_SEC, ingame.run),
         Job("results", config.RESULTS_INTERVAL_SEC, results.run),
         Job("reports", config.REPORT_CHECK_INTERVAL_SEC, reports.run_due),
+        Job("books", config.BOOKS_INTERVAL_SEC, books.run),
     ]
 
 

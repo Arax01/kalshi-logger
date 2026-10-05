@@ -246,5 +246,14 @@ class RerunTests(unittest.TestCase):
         self.assertEqual(months[0][1], calib_rerun.CLEAN_START)
 
 
+class BooksTests(unittest.TestCase):
+    def test_top_levels_reads_best_prices_from_the_end(self):
+        from kalshi_logger.books import top_levels
+        side = [["0.0100", "1300.00"], ["0.0200", "158.00"], ["0.0300", "7.00"], ["0.0400", "1.00"]]
+        self.assertEqual(top_levels(side, 3), [400, 1.0, 300, 7.0, 200, 158.0])
+        self.assertEqual(top_levels([["0.5000", "5.00"]], 3), [5000, 5.0, None, None, None, None])
+        self.assertEqual(top_levels([], 2), [None] * 4)
+
+
 if __name__ == "__main__":
     unittest.main()
