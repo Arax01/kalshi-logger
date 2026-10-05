@@ -206,6 +206,64 @@ CREATE TABLE IF NOT EXISTS games (
     updated_ts INTEGER
 );
 
+-- ===== Backfilled football data (one-time historical pull; separate from live logging) =====
+-- Games found for the backfill and how far each one got.
+CREATE TABLE IF NOT EXISTS bf_games (
+    milestone_id TEXT PRIMARY KEY,
+    league TEXT,            -- NFL or NCAAFB
+    season_type TEXT,       -- PRE (preseason) or REG
+    title TEXT,
+    event_ticker TEXT,
+    start_ts INTEGER,
+    home_team_id TEXT,
+    away_team_id TEXT,
+    status TEXT,            -- done, no_timestamps, no_markets, no_candles, error
+    n_plays INTEGER,
+    n_timed_plays INTEGER,
+    note TEXT,
+    fetched_ts INTEGER
+);
+
+-- Game-winner markets of backfilled games; side says which team the YES side is.
+CREATE TABLE IF NOT EXISTS bf_markets (
+    ticker TEXT PRIMARY KEY,
+    milestone_id TEXT,
+    side TEXT,              -- home or away
+    team_name TEXT,
+    result TEXT
+);
+
+-- Every play, with Kalshi's timestamp of when its feed first saw it.
+CREATE TABLE IF NOT EXISTS bf_plays (
+    milestone_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    play_id TEXT,
+    wall_ts INTEGER,        -- Unix seconds the play was first seen (NULL if not timestamped)
+    period INTEGER,
+    clock TEXT,
+    home_points INTEGER,
+    away_points INTEGER,
+    play_type TEXT,
+    turnover TEXT,
+    description TEXT,
+    PRIMARY KEY (milestone_id, sequence)
+) WITHOUT ROWID;
+
+-- One row per market per minute, from the first to the last 1-minute candle.
+-- observed = 1: Kalshi had a candle for that minute (real prices).
+-- observed = 0: no candle that minute; prices are carried forward from the last real candle
+--               and must not be treated as new information.
+CREATE TABLE IF NOT EXISTS bf_minutes (
+    ticker TEXT NOT NULL,
+    minute_ts INTEGER NOT NULL,   -- end of the minute (Unix seconds)
+    observed INTEGER NOT NULL,
+    yes_bid REAL,                 -- best bid at the end of the minute
+    yes_ask REAL,                 -- best ask at the end of the minute
+    last_price REAL,              -- last trade price in the minute (NULL if no trade)
+    volume REAL,                  -- contracts traded in the minute (0 if no candle)
+    PRIMARY KEY (ticker, minute_ts)
+) WITHOUT ROWID;
+
 -- Each time the logger runs: start, last heartbeat (every minute), end, and whether it stopped
 -- cleanly (stop.bat) or was killed (window closed, crash, power loss).
 CREATE TABLE IF NOT EXISTS process_runs (
