@@ -260,6 +260,21 @@ Everything goes into separate `calib_` tables. The pull can be stopped and resum
 - **Tradeability flag:** a bucket is flagged if it has fewer than 30 events, if its markets' median
   lifetime volume is under 1,000 contracts, or if one event makes up over a quarter of its contracts.
 
+**The holdout is not clean.** While building the report, results that included post-cutoff trades
+were seen before three rules were finalised:
+- the 'effective events' discount;
+- a pattern's side must match the direction of the price gap;
+- 'capturable as a taker' needs the taker return's range above zero.
+
+Section 6 of the report shows what is confirmed under the rules as first written and under each
+change. The three patterns confirmed under the current rules are confirmed under every rule set.
+The extra ones under the original rules rest on very few independent events.
+
+**A clean re-test.** The honest fix is data nobody has looked at. With the rules frozen as they are
+now, move `HOLDOUT_START` in `kalshi_logger/calib_report.py` to October 6, 2026, and run
+`calibration.bat` again in a few months (for example January 2027). Trades from October 6 onward
+then form a fresh test set.
+
 ## Data gaps
 
 Each job (scanner, crypto, in-game, results, reports) records the time of its last success. If a

@@ -251,10 +251,14 @@ def build(conn):
     return groups, vols, quarters, sources
 
 
-def find_patterns(groups, vols):
+def find_patterns(groups, vols, use_effective=True, side_follows_gap=True):
+    """Patterns in the discovery data. The two flags exist so the report can show results under the rules
+    as first written (both False) as well as after the changes made once holdout data had been seen."""
     out = []
     for (split, cat, b), a in groups.items():
-        if split != "discovery" or a.n_events() < MIN_EVENTS or a.effective_events() < MIN_EVENTS:
+        if split != "discovery" or a.n_events() < MIN_EVENTS:
+            continue
+        if use_effective and a.effective_events() < MIN_EVENTS:
             continue
         gap, lo, hi = a.ratio("gap")
         if gap is None or (lo <= 0 <= hi):
@@ -262,7 +266,8 @@ def find_patterns(groups, vols):
         returns = {m: a.ratio(m)[0] for m in WAYS}
         # The side that profits from the mispricing: YES if YES was cheap (won more than its price), else NO.
         side = "yes" if gap > 0 else "no"
-        vals = [(v, m) for m, v in returns.items() if v is not None and m.startswith(side)]
+        vals = [(v, m) for m, v in returns.items()
+                if v is not None and (m.startswith(side) or not side_follows_gap)]
         if not vals:
             continue
         best = max(vals)
@@ -272,6 +277,71 @@ def find_patterns(groups, vols):
                     "events": a.n_events(), "thin": thin_flag(a, vols[(split, cat, b)])})
     out.sort(key=lambda x: -abs(x["gap"][0]))
     return out
+
+
+def check_holdout(groups, patterns, use_effective=True):
+    for pt in patterns:
+        h = groups.get(("holdout", pt["cat"], pt["bucket"]))
+        pt["h"] = h
+        if h is None or h.n_events() < MIN_EVENTS or (use_effective and h.effective_events() < MIN_EVENTS):
+            pt["verdict"] = "not enough holdout data"
+            continue
+        hg, hlo, hhi = h.ratio("gap")
+        hret = h.ratio(pt["best"])[0]
+        same_dir = (hg > 0) == (pt["gap"][0] > 0)
+        if same_dir and (hlo > 0 or hhi < 0) and hret is not None and hret > 0:
+            pt["verdict"] = "CONFIRMED"
+        elif same_dir and hret is not None and hret > 0:
+            pt["verdict"] = "same direction, not significant"
+        else:
+            pt["verdict"] = "did not hold up"
+    return patterns
+
+
+RULE_SETS = [
+    ("As first written (before any results were seen)", False, False),
+    ("+ effective-events rule only", True, False),
+    ("+ side-must-match-gap rule only", False, True),
+    ("Current rules (both changes)", True, True),
+]
+
+
+def sensitivity_section(groups, vols):
+    L = ["6. HOLDOUT CONTAMINATION AND SENSITIVITY TO RULE CHANGES", "",
+         "The holdout is NOT clean. While building this report I looked at results that included holdout trades:",
+         "- a trial run on partial data (86,001 holdout trades, 8,030 holdout events) showed six 'held up' patterns",
+         "  with their holdout returns, the holdout crypto table, and a holdout crypto 20-30c breakdown by series;",
+         "- the full report, including every holdout result, was seen before the last two rule changes.",
+         "Three rules were changed after that: (1) buckets dominated by a few events are discounted ('effective",
+         "events', prompted by the holdout crypto 20-30c result), (2) a pattern's profitable side must match the",
+         "direction of the price gap, and (3) 'capturable as a taker' needs the taker return's 95% range above zero.",
+         "Rules (2) and (3) were added after seeing the full holdout. Because the holdout influenced the rules, its",
+         "confirmations are weaker evidence than a clean test. Below: what gets confirmed under each rule set.",
+         "A clean test needs data nobody has looked at: trades after this report was written (see",
+         "docs/how-it-works.md, 'A clean re-test').",
+         ""]
+    rows = []
+    for label, eff, side in RULE_SETS:
+        pats = check_holdout(groups, find_patterns(groups, vols, eff, side), use_effective=eff)
+        conf = [p for p in pats if p["verdict"] == "CONFIRMED"]
+        if not conf:
+            rows.append([label, len(pats), 0, "(none)", "", "", "", ""])
+        for i, p in enumerate(conf):
+            h = p["h"]
+            sd = "yes" if p["best"].startswith("yes") else "no"
+            t, tlo = h.ratio(f"{sd}_t")[0], h.ratio(f"{sd}_t")[1]
+            rows.append([label if i == 0 else "", len(pats) if i == 0 else "", len(conf) if i == 0 else "",
+                         f"{p['cat']}, {LABELS[p['bucket']]}", _side_label(p["best"]), _pct(h.ratio(p["best"])[0]),
+                         f"{_pct(t)} ({'range above 0' if (tlo or -1) > 0 else 'range includes 0 or below'})",
+                         f"{h.n_events()} / ~{h.effective_events():.0f}"])
+    L += [_table(["Rule set", "Patterns found", "Confirmed", "Confirmed pattern", "Side", "Holdout return/$1",
+                  "Same side as taker on holdout", "Holdout events / effective"], rows), "",
+          "How to read: if a pattern is confirmed under every rule set, the rule changes didn't create it. Patterns "
+          "that appear only under the original rules were removed by the later, stricter rules, almost always "
+          "because a few heavily traded events carry most of their contracts ('effective' events well under 30), "
+          "so their tight-looking ranges overstate the evidence. They are not proven wrong; they rest on few "
+          "independent outcomes and are worth re-testing on fresh data.", ""]
+    return L
 
 
 def _side_label(m):
@@ -296,25 +366,13 @@ def build_report(conn):
                 [["Discovery (before cutoff)", f"{n_trades['discovery']:,}", f"{n_events['discovery']:,}"],
                  ["Holdout (from cutoff)", f"{n_trades['holdout']:,}", f"{n_events['holdout']:,}"]]),
          f"Trades from the random sample: {sources[('discovery', 'random')] + sources[('holdout', 'random')]:,}; "
-         f"from the thin-category top-up: {sources[('discovery', 'topup')] + sources[('holdout', 'topup')]:,}.", ""]
+         f"from the thin-category top-up: {sources[('discovery', 'topup')] + sources[('holdout', 'topup')]:,}.",
+         "IMPORTANT: the holdout was looked at before some rules were finalised, so it is not a clean test. "
+         "Section 6 shows what is confirmed under the rules as first written and under each change.", ""]
 
     patterns = find_patterns(groups, vols)
     # Holdout check for each pattern.
-    for pt in patterns:
-        h = groups.get(("holdout", pt["cat"], pt["bucket"]))
-        pt["h"] = h
-        if h is None or h.n_events() < MIN_EVENTS or h.effective_events() < MIN_EVENTS:
-            pt["verdict"] = "not enough holdout data"
-            continue
-        hg, hlo, hhi = h.ratio("gap")
-        hret = h.ratio(pt["best"])[0]
-        same_dir = (hg > 0) == (pt["gap"][0] > 0)
-        if same_dir and (hlo > 0 or hhi < 0) and hret is not None and hret > 0:
-            pt["verdict"] = "CONFIRMED"
-        elif same_dir and hret is not None and hret > 0:
-            pt["verdict"] = "same direction, not significant"
-        else:
-            pt["verdict"] = "did not hold up"
+    check_holdout(groups, patterns)
 
     L += ["SUMMARY"]
     confirmed = [p for p in patterns if p["verdict"] == "CONFIRMED"]
@@ -471,6 +529,7 @@ def build_report(conn):
         n_ev = len({e for a in accs.values() for e in a.ev})
         L += [f"{cat} ({n_ev:,} events)", _table(BUCKET_HEADERS, _bucket_rows(accs, cv)), ""]
 
+    L += sensitivity_section(groups, vols)
     L += ["CAVEATS",
           "- Prices are those of actual trades; you might not get the same price, and size at that price varied.",
           "- Fees: the taker fee is 0.07 x price x (1 - price) per contract times the series multiplier, rounded "
