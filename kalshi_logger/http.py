@@ -69,6 +69,7 @@ class ReadOnlyClient:
             if resp.status_code == 200:
                 return resp.json()
             if resp.status_code == 429:
+                last_error = "HTTP 429 (rate limited)"
                 with self.stats_lock:
                     self.rate_limited_count += 1
                 log.info("%s rate limited on %s; backing off %.0fs", self.name, path, delay)

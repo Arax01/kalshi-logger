@@ -161,15 +161,20 @@ def _chunks(tickers):
         yield batch
 
 
-def _fetch_markets(endpoint, tickers):
-    """Markets by ticker; if the server still says the URL is too long, split the batch in half."""
-    try:
-        return http.kalshi.get(endpoint, {"tickers": ",".join(tickers), "limit": 1000}).get("markets") or []
-    except http.ApiError as exc:
-        if "HTTP 414" in str(exc) and len(tickers) > 1:
-            half = len(tickers) // 2
-            return _fetch_markets(endpoint, tickers[:half]) + _fetch_markets(endpoint, tickers[half:])
-        raise
+def _fetch_markets(endpoint, tickers, patience=5):
+    """Markets by ticker. If the server says the URL is too long, split the batch in half; if it keeps
+    rate-limiting us, pause a minute and try again (a long pull shouldn't die on a temporary slowdown)."""
+    for attempt in range(patience):
+        try:
+            return http.kalshi.get(endpoint, {"tickers": ",".join(tickers), "limit": 1000}).get("markets") or []
+        except http.ApiError as exc:
+            if "HTTP 414" in str(exc) and len(tickers) > 1:
+                half = len(tickers) // 2
+                return _fetch_markets(endpoint, tickers[:half]) + _fetch_markets(endpoint, tickers[half:])
+            if "429" not in str(exc) or attempt == patience - 1:
+                raise
+            log.warning("Rate limited repeatedly; pausing 60 s before retrying")
+            time.sleep(60)
 
 
 def lookup_markets(conn, cut_markets, series, progress):
@@ -182,10 +187,15 @@ def lookup_markets(conn, cut_markets, series, progress):
     t0, done = time.time(), 0
     for first, second, tickers in (("/historical/markets", "/markets", old), ("/markets", "/historical/markets", new)):
         for n_batch, chunk in enumerate(_chunks(tickers)):
-            got = {m["ticker"]: m for m in _fetch_markets(first, chunk)}
-            missing = [t for t in chunk if t not in got]
-            if missing:
-                got.update({m["ticker"]: m for m in _fetch_markets(second, missing)})
+            try:
+                got = {m["ticker"]: m for m in _fetch_markets(first, chunk)}
+                missing = [t for t in chunk if t not in got]
+                if missing:
+                    got.update({m["ticker"]: m for m in _fetch_markets(second, missing)})
+            except http.ApiError as exc:
+                # Leave these unlooked-up; the next run picks them up.
+                log.warning("Skipping a batch of %d markets for now: %s", len(chunk), exc)
+                continue
             for t in chunk:
                 if t in got:
                     _apply_market(conn, got[t], series)
