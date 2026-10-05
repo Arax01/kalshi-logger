@@ -229,6 +229,37 @@ It writes `reports/football_overreaction.txt`. The method:
   Eastern), then applied unchanged to games on or after that date.
 - **Preseason:** NFL preseason is kept out of both and reported separately.
 
+## Calibration study
+
+`calibration.bat` asks: across Kalshi, do contracts priced at X cents win X% of the time, and where
+are they off by more than fees? It writes `reports/calibration_study.txt`.
+
+**The sample.**
+- **Random windows:** January 2025 to now, 150 random time windows per month, each sized for about
+  1,000 trades. Windows are longer in quiet months, so 2025 isn't drowned out by 2026. The windows are
+  fixed by a seed, so re-running picks the same ones.
+- **Results:** for every sampled trade's market, its final result, event, category and lifetime volume.
+- **Thin-category top-up:** any category with fewer than 200 settled events gets extra events sampled
+  directly from its series, with their trades.
+- **Fee history:** Kalshi's record of when each series' fees changed, so every trade gets the fee in
+  effect at the time.
+
+Everything goes into separate `calib_` tables. The pull can be stopped and resumed.
+
+**The analysis:**
+- **Buckets:** trades are bucketed by YES price (1-5c, 5-10c, 10-20c ... 90-95c, 95-99c). Each bucket
+  shows average price paid against how often YES actually won, weighted by contracts.
+- **Events, not contracts:** confidence ranges count each event once, since strikes in the same event
+  win or lose together. Both event and contract counts are shown.
+- **Returns per $1 after fees, four ways:** YES or NO, each bought by a taker (crossed the spread, paid
+  the taker fee) or by a resting maker order (paid the maker fee, which most series don't charge).
+  A pattern is only capturable as a taker if the taker number is positive.
+- **Holdout:** patterns are looked for only in trades before July 1, 2026, then checked once on trades
+  from July 1, 2026 on.
+- **Edge decay:** each pattern is broken down by quarter, to see whether it shrank as volume grew.
+- **Tradeability flag:** a bucket is flagged if it has fewer than 30 events, if its markets' median
+  lifetime volume is under 1,000 contracts, or if one event makes up over a quarter of its contracts.
+
 ## Data gaps
 
 Each job (scanner, crypto, in-game, results, reports) records the time of its last success. If a

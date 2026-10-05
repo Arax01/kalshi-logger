@@ -184,5 +184,45 @@ class OverreactionTests(unittest.TestCase):
         self.assertEqual(len(trades), 1)   # held to the end of the data, so no overlapping second trade
 
 
+class CalibrationTests(unittest.TestCase):
+    def test_buckets(self):
+        from kalshi_logger.calib_report import _bucket, LABELS
+        self.assertEqual(LABELS[_bucket(0.01)], "1-5c")
+        self.assertEqual(LABELS[_bucket(0.05)], "5-10c")
+        self.assertEqual(LABELS[_bucket(0.50)], "50-60c")
+        self.assertEqual(LABELS[_bucket(0.99)], "95-99c")
+
+    def test_fees_taker_and_maker(self):
+        from kalshi_logger.calib_report import trade_fees
+        self.assertEqual(trade_fees("quadratic", 1.0, 0.5, 100), (1.75, 0.0))          # makers free
+        t, m = trade_fees("quadratic_with_maker_fees", 1.0, 0.5, 100)
+        self.assertEqual((t, m), (1.75, 0.44))                                           # 0.25x, rounded up
+        self.assertEqual(trade_fees("quadratic_with_combo_maker_fees", 1.0, 0.5, 100)[1], 0.88)
+
+    def test_fee_in_effect_at_trade_time(self):
+        import sqlite3
+        from kalshi_logger import db
+        from kalshi_logger.calib_report import FeeBook
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(db.SCHEMA.replace("PRAGMA journal_mode=WAL;", ""))
+        conn.execute("INSERT INTO calib_fee_changes VALUES('S', 1000, 'quadratic_with_maker_fees', 1)")
+        conn.execute("INSERT INTO series(series_ticker, fee_type, fee_multiplier) VALUES('T', 'quadratic', 0)")
+        book = FeeBook(conn)
+        self.assertEqual(book.at("S", 999), ("quadratic", 1.0))
+        self.assertEqual(book.at("S", 1001), ("quadratic_with_maker_fees", 1))
+        self.assertEqual(book.at("T", 5), ("quadratic", 0))
+
+    def test_taker_and_maker_sides(self):
+        from kalshi_logger.calib_report import Acc
+        a = Acc()
+        # Taker bought YES at 30c, YES won; maker (resting NO buyer) lost. No fees for simplicity.
+        a.add("E1", "M1", 0.30, 10, 1.0, True, 0.0, 0.0)
+        self.assertAlmostEqual(a.ratio("yes_t")[0], 1 / 0.30 - 1)
+        self.assertAlmostEqual(a.ratio("no_m")[0], -1.0)
+        self.assertIsNone(a.ratio("yes_m")[0])          # nobody bought YES with a resting order
+        self.assertAlmostEqual(a.ratio("gap")[0], 0.70)  # won (1.0) minus price (0.30)
+
+
 if __name__ == "__main__":
     unittest.main()
