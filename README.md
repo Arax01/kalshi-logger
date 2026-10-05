@@ -50,6 +50,7 @@ Double-click these files in the project folder:
 | `stop.bat` | Stops logging cleanly (it finishes what it is doing first, usually within seconds). |
 | `status.bat` | Shows whether it is running, what it has collected, and any gaps in the data. |
 | `report.bat` | Writes any reports that are due, plus a preview of the latest data, and opens the reports folder. |
+| `backfill.bat` | One time (about 20-30 min): downloads this season's NFL and college football games from Kalshi and writes the football overreaction report. Re-run it later to add newer games. |
 
 **To start it automatically when you log in:** press `Windows key + R`, type `shell:startup`,
 press Enter, then right-click `start.bat` > *Show more options* > *Create shortcut* and move the

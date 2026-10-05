@@ -126,5 +126,63 @@ class WeeklyReportTests(unittest.TestCase):
             self.assertIn(heading, text)
 
 
+def _synthetic_game(prices, plays=(), obs=None):
+    ts = [1_790_000_000 + 60 * i for i in range(len(prices))]
+    return {"id": "g1", "league": "NFL", "season": "REG", "ts": ts,
+            "obs": list(obs) if obs else [True] * len(prices),
+            "bid": [p - 0.01 for p in prices], "ask": [p + 0.01 for p in prices],
+            "plays": list(plays), "end_ts": ts[-1], "fee": ("quadratic", 1.0)}
+
+
+class OverreactionTests(unittest.TestCase):
+    def test_minute_grid_flags_missing_minutes(self):
+        from kalshi_logger.backfill import minute_grid
+        c = lambda ts, b, a: {"end_period_ts": ts, "yes_bid": {"close_dollars": b}, "yes_ask": {"close_dollars": a},
+                              "price": {"close_dollars": a}, "volume_fp": "5"}
+        rows = minute_grid([c(60, "0.40", "0.42"), c(240, "0.50", "0.52")])
+        self.assertEqual([r[0] for r in rows], [60, 120, 180, 240])
+        self.assertEqual([r[1] for r in rows], [1, 0, 0, 1])          # observed flags
+        self.assertEqual(rows[1][2:], (0.40, 0.42, None, 0.0))        # carried forward, no trade, no volume
+
+    def test_play_placed_at_minute_first_seen(self):
+        from kalshi_logger import overreaction as o
+        g = _synthetic_game([0.5] * 20)
+        play = {"home_points": 7, "away_points": 0, "turnover": None, "play_type": "pass",
+                "wall_ts": g["ts"][5] - 30}
+        g["plays"] = [{"home_points": 0, "away_points": 0, "turnover": None, "play_type": "kickoff",
+                       "wall_ts": g["ts"][1]}, play]
+        ev = [e for e in o.play_events(g) if e["kind"] == "touchdown"][0]
+        self.assertEqual((ev["ref"], ev["entry"]), (4, 6))   # minute before the play, one minute after
+
+    def test_fade_pnl_includes_spread_and_fees(self):
+        from kalshi_logger import overreaction as o
+        g = _synthetic_game([0.50, 0.60, 0.55])
+        # Price rose, so fade = buy NO at 1-bid(0.59)=0.41, sell NO later at 1-ask(0.56)=0.44.
+        pnl = o.fade_pnl(g, 1, 2, +1)
+        fee = 2 * 0.0172  # about 1.72c each side at these prices, 100-contract orders
+        self.assertAlmostEqual(pnl, (0.59 - 0.56) - fee, places=3)
+
+    def test_no_lookahead_in_trade_decisions(self):
+        from kalshi_logger import overreaction as o
+        prices = [0.50] * 10 + [0.65] * 5 + [0.60] * 45
+        g = _synthetic_game(prices)
+        g["events"] = o.swing_events(g, 0.12)
+        before = [t for t in o.simulate([g], "price swing >= 12c in 2 min", 0.05, 15)]
+        g2 = _synthetic_game(prices[:13] + [0.99] * (len(prices) - 13))   # change only the future
+        g2["events"] = o.swing_events(g2, 0.12)
+        after = o.simulate([g2], "price swing >= 12c in 2 min", 0.05, 15)
+        self.assertEqual(len(before), 1)
+        self.assertEqual(len(after), 1)   # same trade taken; only its profit differs
+        self.assertNotEqual(before[0][1], after[0][1])
+
+    def test_one_position_per_game_and_forced_exit(self):
+        from kalshi_logger import overreaction as o
+        prices = [0.50, 0.50, 0.70, 0.70, 0.50, 0.50, 0.70, 0.70]
+        g = _synthetic_game(prices)
+        g["events"] = o.swing_events(g, 0.12, gap=1)
+        trades = o.simulate([g], "price swing >= 12c in 2 min", 0.0, 30)
+        self.assertEqual(len(trades), 1)   # held to the end of the data, so no overlapping second trade
+
+
 if __name__ == "__main__":
     unittest.main()
