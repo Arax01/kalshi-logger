@@ -195,6 +195,40 @@ our fetch time, so its delay can be measured later. Kalshi doesn't publish a del
 expect seconds to tens of seconds behind live play. About 3 requests per minute are needed, even
 on a busy Saturday.
 
+## Football backfill and overreaction study
+
+`backfill.bat` downloads finished 2026 NFL and college football games that Kalshi links to
+markets, using two public Kalshi sources:
+- **play-by-play:** every play, with the score and the time Kalshi's feed first saw it;
+- **1-minute candles:** best bid, best ask and last trade price for each team's game-winner market.
+
+Everything goes into separate `bf_` tables, never mixed with live logging:
+
+| Table | One row per |
+|---|---|
+| `bf_games` | game: league, preseason or regular season, kick-off, and how far its download got |
+| `bf_markets` | game-winner market, and which team (home or away) its YES side is |
+| `bf_plays` | play: time first seen, quarter, clock, score, play type, turnover |
+| `bf_minutes` | market per minute; `observed = 0` marks a minute with no candle |
+
+For a minute with no candle, prices are carried forward from the last real candle and flagged
+(`observed = 0`), so analysis can always tell real prices from repeated ones. Games without
+timestamped plays are kept but marked `no_timestamps`, and are not used.
+
+It writes `reports/football_overreaction.txt`. The method:
+- **Big moments:** touchdowns, field goals, safeties, turnovers, and sudden 2-minute price swings.
+  A play counts from the minute Kalshi's feed first saw it.
+- **No look-ahead:** we act one full minute after a play, at that minute's closing bid and ask.
+  Price swings use only closed minutes. Trades are held a fixed time and closed at the last
+  available minute if the price data ends first.
+- **Measurement:** the price move around the moment, then where the price is 5, 15 and 30 minutes
+  later. Does it keep going or come back?
+- **Fade rule:** bet against the initial move, paying the spread and Kalshi's taker fee on both
+  trades. Results are per contract; candles do not show how many contracts were available.
+- **Train/test split:** the rule's settings are picked using games before September 20, 2026 (US
+  Eastern), then applied unchanged to games on or after that date.
+- **Preseason:** NFL preseason is kept out of both and reported separately.
+
 ## Data gaps
 
 Each job (scanner, crypto, in-game, results, reports) records the time of its last success. If a

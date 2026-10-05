@@ -5,6 +5,8 @@
     python -m kalshi_logger status     show what has been collected and any data gaps
     python -m kalshi_logger report     write any due reports, plus a preview of the latest data
     python -m kalshi_logger once JOB   run one job once (scanner, crypto, ingame, results)
+    python -m kalshi_logger backfill   download 2026 football games, then write the overreaction report
+    python -m kalshi_logger overreaction   rewrite the overreaction report from backfilled data
 """
 import sys
 
@@ -46,6 +48,16 @@ def main(argv):
         paths = reports.run_due() + reports.preview(db.connect())
         for path in paths:
             print("Wrote", path)
+        return 0
+    if cmd in ("backfill", "overreaction"):
+        runner.setup_logging(console=False)
+        from . import backfill, db, overreaction
+        db.init()
+        if cmd == "backfill":
+            print("Downloading 2026 NFL and college football games from Kalshi (read-only)...")
+            backfill.run()
+        path = overreaction.write_report(db.connect())
+        print("Wrote", path)
         return 0
     if cmd == "once":
         runner.setup_logging()
