@@ -13,9 +13,9 @@ Method, fixed before looking at results:
   separately for the taker (who crossed the spread, pays the taker fee) and the maker (who was resting,
   pays the maker fee if the series charges one), using the fee in effect at the time of the trade.
 * A "pattern" in the discovery data must have >= MIN_EVENTS events (also after discounting buckets that a
-  few heavily traded events dominate), a calibration gap whose 95% range
-  excludes zero, and a positive return after fees for at least one side. Patterns are then checked on
-  the holdout and broken down by quarter to see whether they are shrinking.
+  few heavily traded events dominate), a calibration gap whose 95% range excludes zero, and a positive
+  return after fees on the side that gap favours (YES if YES was cheap, NO if it was expensive).
+  Patterns are then checked on the holdout and broken down by quarter to see whether they are shrinking.
 """
 import bisect
 import calendar
@@ -260,7 +260,9 @@ def find_patterns(groups, vols):
         if gap is None or (lo <= 0 <= hi):
             continue
         returns = {m: a.ratio(m)[0] for m in WAYS}
-        vals = [(v, m) for m, v in returns.items() if v is not None]
+        # The side that profits from the mispricing: YES if YES was cheap (won more than its price), else NO.
+        side = "yes" if gap > 0 else "no"
+        vals = [(v, m) for m, v in returns.items() if v is not None and m.startswith(side)]
         if not vals:
             continue
         best = max(vals)
@@ -329,11 +331,45 @@ def build_report(conn):
             L.append(f"  * {p['cat']}, {LABELS[p['bucket']]}: buying {side} returned {_pct(t)} per $1 as a taker and "
                      f"{_pct(m)} as a resting maker, after fees, on the holdout ({h.n_events()} events)"
                      f"{'; ' + p['thin'] if p['thin'] else ''}.")
-        taker_ok = [p for p in confirmed if max(p["h"].ratio("yes_t")[0] or -1, p["h"].ratio("no_t")[0] or -1) > 0]
-        maker_only = [p for p in confirmed if p not in taker_ok]
+        def _lo(p, way):
+            lo = p["h"].ratio(way)[1]
+            return lo if lo is not None else -1
+
+        side_of = lambda p: "yes" if p["best"].startswith("yes") else "no"
+        taker_ok = [p for p in confirmed if _lo(p, f"{side_of(p)}_t") > 0]
+        maker_ok = [p for p in confirmed if p not in taker_ok and _lo(p, f"{side_of(p)}_m") > 0]
         if confirmed:
-            L.append(f"- Capturable as a taker (paying the spread and taker fee): {len(taker_ok)}; "
-                     f"only as a resting maker order: {len(maker_only)}.")
+            L.append(f"- Clearly capturable as a taker (95% range of the taker return above zero on the holdout): "
+                     f"{len(taker_ok)}; only by resting maker orders: {len(maker_ok)}; neither clearly: "
+                     f"{len(confirmed) - len(taker_ok) - len(maker_ok)}.")
+            small = [p for p in confirmed if (p["h"].ratio(p["best"])[0] or 0) < 0.01]
+            if small:
+                L.append(f"- {len(small)} of the confirmed patterns {'returns' if len(small) == 1 else 'return'} under "
+                         "1% per $1, which is too small to matter once you account for not always getting filled at "
+                         "these prices.")
+        open_q = [p for p in patterns if p["verdict"] in ("not enough holdout data", "same direction, not significant")]
+        open_q.sort(key=lambda p: -(p["returns"][p["best"]] or 0))
+        if open_q:
+            L.append("- Not yet confirmable (too little holdout data, or same direction but not significant), "
+                     "largest discovery returns first: " + "; ".join(
+                         f"{p['cat']} {LABELS[p['bucket']]} ({_side_label(p['best'])}, {_pct(p['returns'][p['best']])} "
+                         f"before the cutoff, {p['verdict']})" for p in open_q[:5]) +
+                     ". Worth re-checking once more of their markets have settled.")
+    overall = {}
+    for (sp, c, b), g in groups.items():
+        if sp != "holdout":
+            continue
+        a = overall.setdefault(c, Acc())
+        for ev, sums in g.ev.items():
+            for k, v in sums.items():
+                a.ev[ev][k] += v
+        a.trades += g.trades
+    t_lose = sum(1 for a in overall.values() if (a.ratio("taker")[2] or 0) < 0)
+    m_win = sum(1 for a in overall.values() if (a.ratio("maker")[1] or 0) > 0)
+    L.append(f"- Across whole categories on the holdout, takers (who cross the spread and pay the taker fee) lost money "
+             f"with confidence in {t_lose} of {len(overall)} categories, while resting makers came out ahead with "
+             f"confidence in {m_win}. Most of the 'edge' on Kalshi goes to patient resting orders, not to people "
+             "buying at the displayed price (section 3).")
     L += ["- Sample sizes are counted in events as well as contracts: strikes of the same event win or lose "
           "together, so the event count is the honest measure of how much evidence there is.", ""]
 
