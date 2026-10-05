@@ -61,7 +61,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS rest_points (
     point_id INTEGER PRIMARY KEY,
     grp TEXT, ticker TEXT, series_ticker TEXT, event_ticker TEXT, result TEXT,
-    t INTEGER, close_ts INTEGER,
+    t INTEGER, close_ts INTEGER,   -- t: the sampled trade's time, then the order time once quoted
     side TEXT,                -- 'no' = NO bid; 'yes' = YES bid
     yes_bid REAL, yes_ask REAL,
     mids TEXT,                -- JSON: minute ts -> mid, from t to t+90 min (for markouts)
@@ -138,8 +138,10 @@ def _quotes(conn, p):
         a = _cv(c, "yes_ask") or a
         if b is not None and a is not None:
             mids[c["end_period_ts"]] = (b + a) / 2
-    conn.execute("UPDATE rest_points SET yes_bid=?, yes_ask=?, mids=? WHERE point_id=?",
-                 (bid, ask, json.dumps(mids), p["point_id"]))
+    # The quote is the close of that minute, so the order goes in then (no trades from before it count).
+    order_ts = max(p["t"], last["end_period_ts"])
+    conn.execute("UPDATE rest_points SET t=?, yes_bid=?, yes_ask=?, mids=? WHERE point_id=?",
+                 (order_ts, bid, ask, json.dumps(mids), p["point_id"]))
 
 
 def _tape(conn, ticker, t0, t1, cut_trades):
@@ -175,8 +177,8 @@ def pull(conn, progress=print):
     t0 = time.time()
     for i, p in enumerate(todo, 1):
         try:
-            _quotes(conn, p)
             _tape(conn, p["ticker"], first_t[p["ticker"]], p["close_ts"] + 60, cut)
+            _quotes(conn, p)
             conn.execute("UPDATE rest_points SET done=1 WHERE point_id=? AND done=0", (p["point_id"],))
         except http.ApiError as exc:
             log.warning("Skipping %s for now: %s", p["ticker"], exc)
@@ -420,7 +422,12 @@ def build_report(conn):
           "- Fills from orders posted at the same price after yours are correctly excluded (first come, first "
           "served), but a better price posted by someone else after you would take fills from you; that is "
           "only partly captured (trades at their better price don't count for you).",
-          "- 1-minute prices are used for the price at the moment of the order and for the after-fill moves.",
+          "- 1-minute prices are used for the price at the moment of the order and for the after-fill moves. The "
+          "order goes in at the close of the minute containing the sampled trade. Within a minute the real best "
+          "price can differ from the 1-minute close, so some orders are a cent better or worse than the true best.",
+          "- These price ranges were picked because the calibration study found them mispriced in this same "
+          "history (January 2025 on), so the 'filled instantly' returns are in-sample and likely flatter the "
+          "edge. The useful comparison is between rows (fill rates, filled vs. instant), not the level itself.",
           "- Entertainment and Mentions moments come from markets that had settled by the time of the "
           "calibration pull, so very long-dated markets are under-represented.",
           ""]
