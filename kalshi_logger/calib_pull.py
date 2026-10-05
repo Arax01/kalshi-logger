@@ -145,6 +145,33 @@ def _apply_market(conn, m, series):
          num(m.get("volume_fp", m.get("volume")))))
 
 
+MAX_TICKER_CHARS = 2500   # keep request URLs short; long combo tickers made 100 per request too long
+
+
+def _chunks(tickers):
+    """Batches of up to 100 tickers whose combined length keeps the request URL short."""
+    batch, size = [], 0
+    for t in tickers:
+        if batch and (len(batch) >= 100 or size + len(t) + 3 > MAX_TICKER_CHARS):
+            yield batch
+            batch, size = [], 0
+        batch.append(t)
+        size += len(t) + 3   # each comma becomes %2C
+    if batch:
+        yield batch
+
+
+def _fetch_markets(endpoint, tickers):
+    """Markets by ticker; if the server still says the URL is too long, split the batch in half."""
+    try:
+        return http.kalshi.get(endpoint, {"tickers": ",".join(tickers), "limit": 1000}).get("markets") or []
+    except http.ApiError as exc:
+        if "HTTP 414" in str(exc) and len(tickers) > 1:
+            half = len(tickers) // 2
+            return _fetch_markets(endpoint, tickers[:half]) + _fetch_markets(endpoint, tickers[half:])
+        raise
+
+
 def lookup_markets(conn, cut_markets, series, progress):
     rows = conn.execute(
         "SELECT t.ticker, MAX(t.ts) last_ts FROM calib_trades t LEFT JOIN calib_markets m ON m.ticker=t.ticker "
@@ -154,14 +181,11 @@ def lookup_markets(conn, cut_markets, series, progress):
     progress(f"Looking up results for {len(rows):,} markets...")
     t0, done = time.time(), 0
     for first, second, tickers in (("/historical/markets", "/markets", old), ("/markets", "/historical/markets", new)):
-        for i in range(0, len(tickers), 100):
-            chunk = tickers[i: i + 100]
-            got = {m["ticker"]: m for m in http.kalshi.get(first, {"tickers": ",".join(chunk), "limit": 1000})
-                   .get("markets") or []}
+        for n_batch, chunk in enumerate(_chunks(tickers)):
+            got = {m["ticker"]: m for m in _fetch_markets(first, chunk)}
             missing = [t for t in chunk if t not in got]
             if missing:
-                got.update({m["ticker"]: m for m in http.kalshi.get(second, {"tickers": ",".join(missing),
-                                                                               "limit": 1000}).get("markets") or []})
+                got.update({m["ticker"]: m for m in _fetch_markets(second, missing)})
             for t in chunk:
                 if t in got:
                     _apply_market(conn, got[t], series)
@@ -169,7 +193,7 @@ def lookup_markets(conn, cut_markets, series, progress):
                     conn.execute("INSERT OR REPLACE INTO calib_markets(ticker,looked_up) VALUES(?,1)", (t,))
             conn.commit()
             done += len(chunk)
-            if (i // 100) % 50 == 0:
+            if n_batch % 50 == 0:
                 left = (time.time() - t0) / done * (len(rows) - done)
                 progress(f"  {done:,}/{len(rows):,} markets (about {left / 60:.0f} min left)")
 
