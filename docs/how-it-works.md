@@ -285,6 +285,12 @@ They are tested only on trades from October 6, 2026. Run `calibration_rerun.bat`
 15, 2027 (first look) and again on or after July 15, 2027 (final look). Before the first look date
 the re-test report shows only how much fresh data has accumulated, never results.
 
+Two more hypotheses were added on October 6, 2026, before any October 6+ data was pulled.
+- **H5 (Mentions) and H6 (Entertainment):** resting NO orders at 30-60c, under the resting-order
+  study's fill rules with realistic sizing, at each of the three wait times.
+- **Data:** the re-test pull draws order moments from the fresh sample and replays them once their
+  market has settled.
+
 ## Resting-order study
 
 `resting_orders.bat` asks: the calibration study says some prices are cheap for a resting (maker)
@@ -305,6 +311,13 @@ typical (median logged size at the best price) and long (90th percentile, pessim
 come from the logger's own snapshots (order books, scans, crypto checks); before there are any, it uses
 the sizes measured in October 2026. Results are shown for three waits: 5 minutes, 1 hour, and until
 the market closes (unfilled orders are cancelled and cost nothing).
+
+**Sizing.** Realistic sizing is the default. The $100 is worked in pieces no bigger than the typical
+size at the best price (about 24 contracts in Mentions, 200 in Entertainment). Each piece joins the
+back of the queue, and the next is posted only after it fills. A trade at a worse price than ours fills
+us only with that trade's own contracts. The first run (October 5) let the whole $100 order rest at
+once, and let a single trade through our price fill all of it. The report's last section shows both
+ways side by side.
 
 **What it reports.** Fill rate; typical wait to the first fill; return per $1 on the filled
 contracts at settlement after the maker fee then in effect (with event-clustered 95% ranges); the
