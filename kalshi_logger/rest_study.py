@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS rest_tape (
 );
 CREATE INDEX IF NOT EXISTS rest_tape_ticker ON rest_tape(ticker, ts);
 CREATE TABLE IF NOT EXISTS rest_tape_done (ticker TEXT PRIMARY KEY, from_ts INTEGER, truncated INTEGER);
+CREATE TABLE IF NOT EXISTS rest_rerun_months (month TEXT PRIMARY KEY, sampled_ts INTEGER);
 """
 
 
@@ -243,25 +244,33 @@ def _in_range(price, lo, hi, side):
     return a - 1e-9 <= price <= b + 1e-9
 
 
-def simulate(point, trades, queue, wait):
-    """Contracts filled and time of the first fill for one resting order.
+def simulate(point, trades, queue, wait, child=None, through_fills_all=True):
+    """Contracts filled and time of the first fill for one resting order of about $100.
 
     NO bid at q (= YES ask at a = 1 - q): fills against takers buying YES at a. A taker buying YES above a
-    means everything at a was used up, so our order is fully filled by then.
-    YES bid at p: fills against takers selling YES (buying NO) at p; a trade below p means fully filled.
+    means everything at a was used up first (the queue ahead is gone).
+    YES bid at p: fills against takers selling YES (buying NO) at p; a trade below p means the same.
+
+    child=None: the whole $100 order rests at once (the original study).
+    child=S: realistic sizing. At most S contracts rest at a time; when they have all filled, the next S are
+    posted at the same price at the back of the queue (the same queue size again), until $100 has filled
+    or the wait ends. A partly filled child is cancelled at the end.
+    through_fills_all=True: a trade through our price fills everything we have resting (the original study).
+    False: it clears the queue ahead but fills us only with that trade's own contracts.
     """
     side = point["side"]
     if side == "no":
         level = point["yes_ask"]
-        price = 1 - level
+        price = None if level is None else 1 - level
     else:
         level = point["yes_bid"]
         price = level
     if level is None or not 0 < price < 1:
         return None
     size = math.floor(ORDER_DOLLARS / price)
+    step = size if child is None else max(1, min(int(child), size))
     end = point["close_ts"] if wait is None else min(point["close_ts"], point["t"] + wait)
-    done = 0.0
+    cur, got, ahead, filled = step, 0.0, float(queue), 0.0
     first = full = None
     for tr in trades:
         if tr["ts"] <= point["t"] or tr["ts"] > end or tr["yes_price"] is None:
@@ -272,22 +281,30 @@ def simulate(point, trades, queue, wait):
         else:
             hits = tr["taker_side"] == "no" and abs(tr["yes_price"] - level) < 1e-9
             through = tr["taker_side"] == "no" and tr["yes_price"] < level - 1e-9
+        if not (hits or through):
+            continue
+        vol = tr["count"] or 0.0
         if through:
-            done = queue + size
-        elif hits:
-            done += tr["count"]
-        filled = min(max(done - queue, 0.0), size)
-        if filled > 0 and first is None:
-            first = tr["ts"]
+            ahead = 0.0
+            if through_fills_all:
+                vol = math.inf
+        take = min(max(vol - ahead, 0.0), cur - got)
+        ahead = max(ahead - vol, 0.0)
+        if take > 0:
+            got += take
+            filled += take
+            if first is None:
+                first = tr["ts"]
         if filled >= size:
             full = tr["ts"]
             break
-    filled = min(max(done - queue, 0.0), size)
+        if got >= cur:   # this child is done: post the next one at the back of the queue
+            cur, got, ahead = min(step, size - filled), 0.0, float(queue)
     return {"price": price, "size": size, "filled": filled, "first": first, "full": full}
 
 
-def _cluster_ratio(by_event):
-    """Ratio of sums with a 95% range treating each event as one unit."""
+def _cluster_ratio(by_event, z=1.96):
+    """Ratio of sums with a range (95% by default) treating each event as one unit."""
     N = sum(n for n, _ in by_event.values())
     D = sum(d for _, d in by_event.values())
     if D <= 0:
@@ -295,7 +312,7 @@ def _cluster_ratio(by_event):
     r = N / D
     var = sum((n - r * d) ** 2 for n, d in by_event.values()) / (D * D)
     se = math.sqrt(var)
-    return r, r - 1.96 * se, r + 1.96 * se
+    return r, r - z * se, r + z * se
 
 
 def _pc(x):
@@ -432,6 +449,115 @@ def build_report(conn):
           "calibration pull, so very long-dated markets are under-represented.",
           ""]
     return "\n".join(L)
+
+
+# ---------- pre-registered re-test (H5, H6; see docs/preregistration-calibration-rerun.md) ----------
+# Frozen on October 6, 2026. Do not change: the clean re-test depends on these exact numbers.
+
+RERUN_GROUPS = {
+    # hypothesis: (category, YES price range of the sampled trade, side, child size, typical queue, long queue)
+    "H5": ("Mentions", 0.40, 0.70, "no", 24, 24, 102),
+    "H6": ("Entertainment", 0.40, 0.70, "no", 200, 200, 1363),
+}
+RERUN_Z = 2.64          # 97.5% for two looks, split again over the three wait times
+RERUN_MIN_EVENTS = 30
+
+
+def sample_fresh(conn, months):
+    """Every sampled fresh trade in the H5/H6 ranges becomes an order moment (at most 3 per market per
+    month, chosen with a fixed seed). months: (label, start, end) of complete months from October 6, 2026."""
+    conn.executescript(SCHEMA)
+    for month, t0, t1 in months:
+        if conn.execute("SELECT 1 FROM rest_rerun_months WHERE month=?", (month,)).fetchone():
+            continue
+        rng = random.Random(f"kalshi-resting-order-rerun-{month}")
+        for hid, (cat, lo, hi, side, *_rest) in RERUN_GROUPS.items():
+            rows = conn.execute(
+                "SELECT t.ticker, t.ts, m.series_ticker, m.event_ticker, m.close_ts FROM calib_trades t "
+                "JOIN calib_markets m ON m.ticker=t.ticker WHERE m.category=? AND t.yes_price>=? AND t.yes_price<? "
+                "AND t.ts>=? AND t.ts<? ORDER BY t.ticker, t.ts", (cat, lo, hi, t0, t1)).fetchall()
+            rng.shuffle(rows)
+            per_market, picked = defaultdict(int), []
+            for r in rows:
+                if per_market[r["ticker"]] < MAX_PER_MARKET:
+                    per_market[r["ticker"]] += 1
+                    picked.append(r)
+            conn.executemany(
+                "INSERT INTO rest_points(grp,ticker,series_ticker,event_ticker,t,close_ts,side) VALUES(?,?,?,?,?,?,?)",
+                [(f"rerun {hid}", r["ticker"], r["series_ticker"], r["event_ticker"], r["ts"], r["close_ts"], side)
+                 for r in picked])
+        conn.execute("INSERT INTO rest_rerun_months VALUES(?,?)", (month, int(time.time())))
+        conn.commit()
+
+
+def pull_rerun(conn, progress=print):
+    """Quotes and trade history for fresh order moments whose market has settled (others wait)."""
+    cut = parse_ts(http.kalshi.get("/historical/cutoff")["trades_created_ts"])
+    todo = conn.execute(
+        "SELECT p.*, m.result AS m_result, m.close_ts AS m_close FROM rest_points p JOIN calib_markets m "
+        "ON m.ticker=p.ticker WHERE p.grp LIKE 'rerun %' AND p.done=0 AND m.result IN ('yes','no') "
+        "ORDER BY p.ticker, p.t").fetchall()
+    progress(f"Resting-order re-test: {len(todo)} settled order moments to fetch...")
+    for i, p in enumerate(todo, 1):
+        try:
+            conn.execute("UPDATE rest_points SET result=?, close_ts=? WHERE point_id=?",
+                         (p["m_result"], p["m_close"], p["point_id"]))
+            p = conn.execute("SELECT * FROM rest_points WHERE point_id=?", (p["point_id"],)).fetchone()
+            _tape(conn, p["ticker"], p["t"], p["close_ts"] + 60, cut)
+            _quotes(conn, p)
+            conn.execute("UPDATE rest_points SET done=1 WHERE point_id=? AND done=0", (p["point_id"],))
+        except http.ApiError as exc:
+            log.warning("Skipping %s for now: %s", p["ticker"], exc)
+        conn.commit()
+        if i % 100 == 0:
+            progress(f"  {i}/{len(todo)}")
+
+
+def rerun_results(conn, hid, data_end, z=RERUN_Z):
+    """Per wait time: orders, share filled, events and effective events with fills, and the return per $1
+    on filled contracts after fees with its range. Typical queue and realistic sizing (frozen)."""
+    conn.executescript(SCHEMA)
+    cat, lo, hi, side, child, queue, _ = RERUN_GROUPS[hid]
+    feebook = FeeBook(conn)
+    pts = [p for p in conn.execute(
+        "SELECT * FROM rest_points WHERE grp=? AND done=1 AND t<? AND result IN ('yes','no') "
+        "AND yes_bid IS NOT NULL AND yes_ask IS NOT NULL", (f"rerun {hid}", data_end))
+        if _in_range(order_price(p), lo, hi, side)]
+    tapes = defaultdict(list)
+    for tk in {p["ticker"] for p in pts}:
+        tapes[tk] = conn.execute("SELECT * FROM rest_tape WHERE ticker=? ORDER BY ts", (tk,)).fetchall()
+    out = []
+    for wlabel, wait in WAITS:
+        by_ev = defaultdict(lambda: [0.0, 0.0])
+        n = nf = 0
+        for p in pts:
+            sim = simulate(p, tapes[p["ticker"]], queue, wait, child=child, through_fills_all=False)
+            if sim is None:
+                continue
+            n += 1
+            if sim["filled"] > 0:
+                nf += 1
+                ft, fm = feebook.at(p["series_ticker"], p["t"])
+                _, fee = trade_fees(ft, fm, sim["price"], sim["filled"])
+                won = 1.0 if p["result"] == side else 0.0
+                by_ev[p["event_ticker"]][0] += sim["filled"] * won - fee
+                by_ev[p["event_ticker"]][1] += sim["filled"] * sim["price"]
+        cost = [d for _, d in by_ev.values()]
+        eff = (sum(cost) ** 2 / sum(c * c for c in cost)) if cost else 0.0
+        r, rlo, rhi = _cluster_ratio(by_ev, z)
+        out.append({"wait": wlabel, "orders": n, "filled": nf, "events": len(by_ev), "effective": eff,
+                    "ret": None if r is None else r - 1, "lo": None if rlo is None else rlo - 1,
+                    "hi": None if rhi is None else rhi - 1})
+    return out
+
+
+def rerun_verdict(rows):
+    testable = [r for r in rows if r["events"] >= RERUN_MIN_EVENTS and r["effective"] >= RERUN_MIN_EVENTS]
+    if not testable:
+        return "NOT YET TESTABLE"
+    if any(r["lo"] is not None and r["lo"] > 0 for r in testable):
+        return "SUPPORTED"
+    return "NOT SUPPORTED"
 
 
 def write_report(conn):

@@ -302,6 +302,29 @@ class RestingOrderTests(unittest.TestCase):
         self.assertFalse(_in_range(0.65, 0.40, 0.70, "no"))
         self.assertTrue(_in_range(0.99, 0.95, 0.995, "yes"))
 
+    def test_through_trade_fills_only_its_own_size_when_asked(self):
+        from kalshi_logger.rest_study import simulate
+        sim = simulate(self.P, [self._tr(1100, 0.62, 30)], 5000, None, through_fills_all=False)
+        self.assertEqual(sim["filled"], 30)       # queue cleared, but only 30 contracts traded
+
+    def test_child_orders_rejoin_the_back_of_the_queue(self):
+        from kalshi_logger.rest_study import simulate
+        # 24-contract pieces behind a 24-contract queue: the first 48 traded fill piece 1; the next piece
+        # waits behind another 24.
+        trades = [self._tr(1100, 0.60, 48), self._tr(1200, 0.60, 30), self._tr(1300, 0.60, 100)]
+        sim = simulate(self.P, trades, 24, None, child=24, through_fills_all=False)
+        self.assertEqual(sim["filled"], 24 + 6 + 18)
+        self.assertEqual(sim["first"], 1100)
+        # Without the queue, pieces fill straight from the trades (capped at the $100 order of 250).
+        self.assertEqual(simulate(self.P, [self._tr(1100, 0.60, 1000)], 0, None, child=24)["filled"], 24)
+
+    def test_rerun_verdict(self):
+        from kalshi_logger.rest_study import rerun_verdict
+        row = {"events": 40, "effective": 35, "lo": 0.01}
+        self.assertEqual(rerun_verdict([dict(row, events=10)]), "NOT YET TESTABLE")
+        self.assertEqual(rerun_verdict([row]), "SUPPORTED")
+        self.assertEqual(rerun_verdict([dict(row, lo=-0.01)]), "NOT SUPPORTED")
+
     def test_queue_sizes_fall_back_without_logged_data(self):
         import sqlite3
         from kalshi_logger import db, rest_study
