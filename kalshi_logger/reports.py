@@ -15,7 +15,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-from . import config, db, fees, results, volsurface
+from . import config, db, fees, paper, results, volsurface
 
 log = logging.getLogger(__name__)
 
@@ -709,6 +709,7 @@ def scanner_weekly(conn, start, end, label):
     lines += ["4. " + "\n".join(crypto_weekly_section(conn, start, end))]
     lines += ["5. " + "\n".join(longshot_section(conn, start, end))]
     lines += ["6. " + "\n".join(ingame_section(conn, start, end))]
+    lines += ["7. " + "\n".join(paper.report_section(conn, start, end))]
     return "\n".join(lines)
 
 

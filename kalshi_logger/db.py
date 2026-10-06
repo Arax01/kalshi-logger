@@ -217,6 +217,35 @@ CREATE TABLE IF NOT EXISTS book_snapshots (
     PRIMARY KEY (market_id, ts)
 ) WITHOUT ROWID;
 
+-- Forward paper trading: simulated resting NO orders (never sent anywhere). One row per simulated order.
+-- queue = contracts showing at our price when placed (all assumed ahead of us). Two cases are tracked:
+-- pess(imistic): only trades at our price shrink the queue ahead; opt(imistic): it also shrinks when the
+-- book shows fewer contracts at our price (people ahead of us cancelling).
+CREATE TABLE IF NOT EXISTS paper_orders (
+    order_id INTEGER PRIMARY KEY,
+    market_id INTEGER NOT NULL,
+    category TEXT,
+    placed_ts INTEGER NOT NULL,
+    no_price REAL,          -- our NO bid (dollars)
+    size REAL,              -- contracts
+    queue REAL,             -- contracts ahead of us when placed
+    yes_bid REAL, yes_ask REAL,   -- market when placed
+    ahead_pess REAL, ahead_opt REAL,
+    filled_pess REAL DEFAULT 0, filled_opt REAL DEFAULT 0,
+    done INTEGER DEFAULT 0  -- 1 once fully filled in both cases, or the market has closed
+);
+CREATE INDEX IF NOT EXISTS paper_orders_market ON paper_orders(market_id, done);
+CREATE INDEX IF NOT EXISTS paper_orders_placed ON paper_orders(placed_ts);
+CREATE TABLE IF NOT EXISTS paper_fills (
+    order_id INTEGER NOT NULL,
+    ts INTEGER NOT NULL,
+    scenario TEXT NOT NULL, -- 'pess' or 'opt'
+    qty REAL
+);
+CREATE INDEX IF NOT EXISTS paper_fills_order ON paper_fills(order_id);
+-- How far each market's public trades have been read for paper fills.
+CREATE TABLE IF NOT EXISTS paper_markets (market_id INTEGER PRIMARY KEY, trades_read_to INTEGER);
+
 -- ===== Backfilled football data (one-time historical pull; separate from live logging) =====
 -- Games found for the backfill and how far each one got.
 CREATE TABLE IF NOT EXISTS bf_games (

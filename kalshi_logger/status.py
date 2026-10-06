@@ -51,6 +51,8 @@ def print_status():
         ("Crypto fair values", "SELECT COUNT(*) FROM crypto_fv WHERE ts > ?"),
         ("In-game snapshots", "SELECT COUNT(*) FROM game_snapshots WHERE ts > ?"),
         ("Order-book snapshots", "SELECT COUNT(*) FROM book_snapshots WHERE ts > ?"),
+        ("Paper orders placed", "SELECT COUNT(*) FROM paper_orders WHERE placed_ts > ?"),
+        ("Paper fills (pess.)", "SELECT COUNT(*) FROM paper_fills WHERE ts > ? AND scenario='pess'"),
     ]
     for label, sql in counts:
         print(f"  {label + ':':<24}{q(sql):,}")

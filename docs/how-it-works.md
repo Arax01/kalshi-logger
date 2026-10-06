@@ -97,6 +97,27 @@ is a YES ask at 1 - q.
   books changed in each 3-minute round, so this is about 5 MB a day (up to about 10 MB on busy days).
 - **Purpose:** this data narrows the queue assumption in the resting-order study.
 
+**Forward paper trading (books and paper jobs).** Simulated orders only: nothing is ever sent to
+Kalshi, and no key is used.
+- **Placing:** each time the books job reads a Mentions or Entertainment book whose best NO bid is
+  30-60c, it records a simulated resting NO order at that bid. The order is one piece of realistic
+  size: the smaller of $100 and the typical size at the best price (24 contracts in Mentions, 200 in
+  Entertainment). Everything showing at that price is assumed to be ahead of us. A market gets a new
+  piece once its last one has filled, or after an hour.
+- **Filling:** every 15 minutes the paper job reads Kalshi's public trades for each market with open
+  orders (one request per market, about 0.1 requests a second in all). A taker buying YES at 1 minus
+  our NO price trades with the queue ahead first, then with us. A taker buying YES above that clears
+  the queue and fills us with that trade's own contracts.
+- **Two cases:** pessimistic, where the queue ahead shrinks only through trades; and optimistic, where
+  it also shrinks when the logged book shows fewer contracts at our price (people ahead cancelling).
+- **Scoring:** each order is followed until its market closes. The weekly report scores it three
+  ways: cancelled after 5 minutes, after 1 hour, or left until close. It shows profit after the maker
+  fee once the market settles, with ranges clustered by event, and how the price moved 5 and 30
+  minutes after the first fill.
+- **Storage:** up to about 2,400 orders a day plus their fills, well under 1 MB a day.
+- **Separate from the re-test:** paper trading started October 6, 2026, the same day as the
+  pre-registered re-test, but it is a separate measurement and is not used to judge H5 or H6.
+
 ## Priority 2: crypto fair value
 
 **Markets covered:** BTC and ETH above/below (hourly, daily, weekly), ranges, 15-minute up/down,
@@ -365,6 +386,7 @@ since the previous row, so nothing is misread. `status.bat` shows how the logger
 | `crypto_far` | far-away crypto strike per 30 minutes: fair value, vol, quotes and sizes (for the longshot report) |
 | `games`, `game_snapshots` | game, and game-winner market per minute while the game is in progress |
 | `book_snapshots` | Entertainment/Mentions market per change: top 3 YES and NO bids with sizes |
+| `paper_orders`, `paper_fills`, `paper_markets` | simulated paper order: market, time, NO price, size, queue ahead, fills (pessimistic and optimistic) |
 | `gaps` | period without data, with a reason |
 | `process_runs` | each time the logger ran: start, last heartbeat, end, and whether it was stopped cleanly |
 | `series` | Kalshi series: category, tags, fee type and multiplier |
