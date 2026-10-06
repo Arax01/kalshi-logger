@@ -51,6 +51,8 @@ Double-click these files in the project folder:
 | `status.bat` | Shows whether it is running, what it has collected, and any gaps in the data. |
 | `report.bat` | Writes any reports that are due, plus a preview of the latest data, and opens the reports folder. |
 | `calibration.bat` | One time (about 1.5-2 hours, ~250 MB): samples historical Kalshi trades and writes the calibration study. Can be stopped and restarted. |
+| `calibration_rerun.bat` | The pre-registered clean re-test of the calibration study. Run on or after January 15, 2027, and again on or after July 15, 2027. |
+| `resting_orders.bat` | One time (about 1 hour, after `calibration.bat`): replays Kalshi's trade history to see whether a ~$100 resting order would have filled and what it would have earned. Writes `reports/resting_orders.txt`. Places no orders. |
 | `backfill.bat` | One time (about 20-30 min): downloads this season's NFL and college football games from Kalshi and writes the football overreaction report. Re-run it later to add newer games. |
 
 **To start it automatically when you log in:** press `Windows key + R`, type `shell:startup`,
@@ -70,8 +72,9 @@ is still the tidier way to stop it.
 
 ## Where things are kept
 
-- `data\kalshi.db` is all the recorded data, in one SQLite database file. Expect up to about 100 MB a day
-  on busy sports days, less on quiet days (roughly 1.5-3 GB a month). To start over, stop the logger and delete the `data`
+- `data\kalshi.db` is all the recorded data, in one SQLite database file. Expect up to about 110 MB a day
+  on busy sports days, less on quiet days (roughly 1.7-3.3 GB a month). That includes about 5-10 MB a day
+  of order-book snapshots for Entertainment and Mentions markets. To start over, stop the logger and delete the `data`
   folder.
 - `reports\` holds the reports. `logs\` holds a technical log, useful if something goes wrong.
 - None of these are uploaded anywhere or saved to GitHub.

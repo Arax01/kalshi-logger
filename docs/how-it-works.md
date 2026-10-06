@@ -88,6 +88,15 @@ In practice it means:
 Quoters may also pay a maker fee: Kalshi's changelog describes a 0.5 maker-fee multiplier for
 combo quoters in some cases. This logger does none of that; it only reads public data.
 
+**Order-book snapshots (books job).** Every 3 minutes, for each open Entertainment or Mentions market
+that traded at least 100 contracts in the last 24 hours (about 750-850 markets), the logger stores
+the top 3 price levels on each side: YES bids and NO bids, with the contracts at each. A NO bid at q
+is a YES ask at 1 - q.
+- **Request rate:** one public request covers 100 markets, so this is about 0.05 requests per second.
+- **Storage:** a row is written only when those levels change, or hourly. In testing about 17% of
+  books changed in each 3-minute round, so this is about 5 MB a day (up to about 10 MB on busy days).
+- **Purpose:** this data narrows the queue assumption in the resting-order study.
+
 ## Priority 2: crypto fair value
 
 **Markets covered:** BTC and ETH above/below (hourly, daily, weekly), ranges, 15-minute up/down,
@@ -270,10 +279,40 @@ Section 6 of the report shows what is confirmed under the rules as first written
 change. The three patterns confirmed under the current rules are confirmed under every rule set.
 The extra ones under the original rules rest on very few independent events.
 
-**A clean re-test.** The honest fix is data nobody has looked at. With the rules frozen as they are
-now, move `HOLDOUT_START` in `kalshi_logger/calib_report.py` to October 6, 2026, and run
-`calibration.bat` again in a few months (for example January 2027). Trades from October 6 onward
-then form a fresh test set.
+**A clean re-test (pre-registered).** The rules are frozen and four hypotheses are named in
+advance in `docs/preregistration-calibration-rerun.md`. One of them is Combos 90-95c YES as a taker.
+They are tested only on trades from October 6, 2026. Run `calibration_rerun.bat` on or after January
+15, 2027 (first look) and again on or after July 15, 2027 (final look). Before the first look date
+the re-test report shows only how much fresh data has accumulated, never results.
+
+## Resting-order study
+
+`resting_orders.bat` asks: the calibration study says some prices are cheap for a resting (maker)
+order, but would a ~$100 resting order actually get filled, and are the fills you get the bad ones?
+It writes `reports/resting_orders.txt`. It places no orders; it replays history.
+
+**Which orders.** About 350 moments per group are drawn at random from the calibration study's
+sampled trades (at most 3 per market, fixed seed):
+- Entertainment and Mentions: a NO bid at the best NO bid when NO costs 30-60c;
+- Crypto, as a comparison: a YES bid at the best YES bid when YES costs 95-99c.
+Combos are left out. Each order is about $100 (contracts = $100 / price).
+
+**Did it fill.** Kalshi's 1-minute prices give the best bid and ask at that moment. Kalshi's public
+trade history then decides the fill: our order fills only after the contracts already waiting at
+that price (the queue) have traded, and a trade at a worse price means everything at ours was used up.
+The real queue is never visible, so three cases are shown: front (nobody ahead, optimistic),
+typical (median logged size at the best price) and long (90th percentile, pessimistic). The sizes
+come from the logger's own snapshots (order books, scans, crypto checks); before there are any, it uses
+the sizes measured in October 2026. Results are shown for three waits: 5 minutes, 1 hour, and until
+the market closes (unfilled orders are cancelled and cost nothing).
+
+**What it reports.** Fill rate; typical wait to the first fill; return per $1 on the filled
+contracts at settlement after the maker fee then in effect (with event-clustered 95% ranges); the
+same orders as if every one had filled instantly (the gap between the two is the adverse-selection
+cost); expected profit per $100 order placed, counting unfilled orders as zero; and how the price
+moved 5 and 30 minutes after a fill.
+
+Its tables (`rest_points`, `rest_tape`, `rest_tape_done`) are separate. The pull can be stopped and resumed.
 
 ## Data gaps
 
@@ -312,6 +351,7 @@ since the previous row, so nothing is misread. `status.bat` shows how the logger
 | `crypto_fv` | crypto market per check: spot prices, vol and how it was derived, fair value, audit fair value, quotes, sizes, fees, gaps |
 | `crypto_far` | far-away crypto strike per 30 minutes: fair value, vol, quotes and sizes (for the longshot report) |
 | `games`, `game_snapshots` | game, and game-winner market per minute while the game is in progress |
+| `book_snapshots` | Entertainment/Mentions market per change: top 3 YES and NO bids with sizes |
 | `gaps` | period without data, with a reason |
 | `process_runs` | each time the logger ran: start, last heartbeat, end, and whether it was stopped cleanly |
 | `series` | Kalshi series: category, tags, fee type and multiplier |

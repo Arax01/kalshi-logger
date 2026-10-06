@@ -50,6 +50,7 @@ def print_status():
         ("Market snapshots", "SELECT COUNT(*) FROM scan_snapshots WHERE ts > ?"),
         ("Crypto fair values", "SELECT COUNT(*) FROM crypto_fv WHERE ts > ?"),
         ("In-game snapshots", "SELECT COUNT(*) FROM game_snapshots WHERE ts > ?"),
+        ("Order-book snapshots", "SELECT COUNT(*) FROM book_snapshots WHERE ts > ?"),
     ]
     for label, sql in counts:
         print(f"  {label + ':':<24}{q(sql):,}")

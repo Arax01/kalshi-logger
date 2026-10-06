@@ -4,10 +4,12 @@
     python -m kalshi_logger stop       ask a running logger to stop (what stop.bat does)
     python -m kalshi_logger status     show what has been collected and any data gaps
     python -m kalshi_logger report     write any due reports, plus a preview of the latest data
-    python -m kalshi_logger once JOB   run one job once (scanner, crypto, ingame, results)
+    python -m kalshi_logger once JOB   run one job once (scanner, crypto, ingame, results, books)
     python -m kalshi_logger backfill   download 2026 football games, then write the overreaction report
     python -m kalshi_logger overreaction   rewrite the overreaction report from backfilled data
     python -m kalshi_logger calibration    sample historical trades (resumable), then write the calibration study
+    python -m kalshi_logger calibration --rerun   pre-registered clean re-test (see docs/preregistration-...)
+    python -m kalshi_logger resting    resting-order study (replays history; needs calibration first)
 """
 import sys
 
@@ -15,7 +17,7 @@ from . import config
 
 
 def build_jobs():
-    from . import crypto, ingame, reports, results, scanner
+    from . import books, crypto, ingame, reports, results, scanner
     from .runner import Job
     return [
         Job("scanner", config.SCAN_INTERVAL_SEC, scanner.run_scan),
@@ -23,6 +25,7 @@ def build_jobs():
         Job("ingame", config.INGAME_INTERVAL_SEC, ingame.run),
         Job("results", config.RESULTS_INTERVAL_SEC, results.run),
         Job("reports", config.REPORT_CHECK_INTERVAL_SEC, reports.run_due),
+        Job("books", config.BOOKS_INTERVAL_SEC, books.run),
     ]
 
 
@@ -64,11 +67,27 @@ def main(argv):
         runner.setup_logging(console=False)
         from . import calib_pull, calib_report, db
         db.init()
+        if "--rerun" in argv:
+            from . import calib_rerun
+            if "--report-only" not in argv:
+                print("Extending the sample with fresh trades from October 6, 2026 (read-only, resumable)...")
+                calib_rerun.pull(db.connect())
+            print("Wrote", calib_rerun.write_report(db.connect()))
+            return 0
         if "--report-only" not in argv:
             print("Sampling historical Kalshi trades (read-only). This takes 1.5-2 hours the first time and can be")
             print("stopped and restarted; it picks up where it left off.")
             calib_pull.run(db.connect())
         print("Wrote", calib_report.write_report(db.connect()))
+        return 0
+    if cmd == "resting":
+        runner.setup_logging(console=False)
+        from . import db, rest_study
+        db.init()
+        if "--report-only" not in argv:
+            print("Replaying Kalshi trade history for imagined resting orders (read-only, resumable)...")
+            rest_study.pull(db.connect())
+        print("Wrote", rest_study.write_report(db.connect()))
         return 0
     if cmd == "once":
         runner.setup_logging()
