@@ -170,7 +170,7 @@ def pull(conn, progress=print):
     conn.executescript(SCHEMA)
     _sample_points(conn)
     cut = parse_ts(http.kalshi.get("/historical/cutoff")["trades_created_ts"])
-    todo = conn.execute("SELECT * FROM rest_points WHERE done=0 ORDER BY ticker, t").fetchall()
+    todo = conn.execute("SELECT * FROM rest_points WHERE done=0 AND grp NOT LIKE 'rerun %' ORDER BY ticker, t").fetchall()
     progress(f"Resting-order study: {len(todo)} order moments to fetch...")
     first_t = {}
     for p in todo:
