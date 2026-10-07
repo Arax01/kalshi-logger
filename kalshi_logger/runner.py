@@ -2,6 +2,7 @@
 import logging
 import logging.handlers
 import os
+import signal
 import sys
 import threading
 import time
@@ -156,6 +157,11 @@ class SingleInstanceLock:
 
 
 def run(jobs):
+    if config.MOVED_FILE.exists():
+        print("This copy of the logger has been moved to the server (see SERVER.md), so it won't start here.")
+        print("Use server_status.bat to check on the server. To log on this computer again anyway, delete the")
+        print(f"file {config.MOVED_FILE.name} in this folder first - but never run both at once.")
+        return 1
     if config.STOP_FILE.exists():
         config.STOP_FILE.unlink()
     lock = SingleInstanceLock(config.PID_FILE)
@@ -166,6 +172,11 @@ def run(jobs):
     process_start = time.time()
     conn = db.connect()
     run_id = _recover_previous_run(conn, int(process_start))
+    # The server's service manager stops the logger with SIGTERM: treat it like stop.bat.
+    try:
+        signal.signal(signal.SIGTERM, lambda signum, frame: stop_event.set())
+    except (ValueError, AttributeError):
+        pass
     log.info("Logger started (read-only). Database: %s", config.DB_PATH)
     threads = []
     for job in jobs:

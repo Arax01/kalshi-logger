@@ -33,6 +33,9 @@ LOG_DIR = ROOT / "logs"
 REPORT_DIR = ROOT / "reports"
 DB_PATH = Path(os.environ.get("DB_PATH", DATA_DIR / "kalshi.db"))
 STOP_FILE = ROOT / "STOP"
+MOVED_FILE = ROOT / "MOVED_TO_SERVER"     # written on the laptop once the database has moved to the server
+LAST_BACKUP_FILE = DATA_DIR / "last_backup.txt"   # written by the server's daily backup
+DISK_WARN_FRACTION = 0.70
 PID_FILE = DATA_DIR / "logger.pid"
 
 # Public, unauthenticated market-data API (documented as a supported production host).

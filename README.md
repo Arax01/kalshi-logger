@@ -29,6 +29,12 @@ Reports are written to the `reports` folder in plain English:
   Its last section is **paper trading**: simulated orders placed that week and how many filled, and,
   since paper trading started, profit after fees on orders whose market has settled (with ranges).
 
+## Running it on a cloud server instead
+
+To keep it running 24/7 (about $6 a month), see **[SERVER.md](SERVER.md)**: a step-by-step guide,
+with double-click files to set up the server, move your data, check on it, get reports, back it up
+and update it.
+
 ## One-time setup (Windows)
 
 1. **Install Python.** Go to https://www.python.org/downloads/ and click the yellow "Download

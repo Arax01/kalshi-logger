@@ -1,0 +1,27 @@
+[Unit]
+Description=Kalshi read-only market-data logger
+After=network-online.target
+Wants=network-online.target
+# Starts only once a database is in place (move_to_server.bat or restore_backup.bat).
+ConditionPathExists=/home/kalshi/kalshi-logger/data/kalshi.db
+StartLimitIntervalSec=0
+
+[Service]
+User=kalshi
+Group=kalshi
+WorkingDirectory=/home/kalshi/kalshi-logger
+ExecStart=/home/kalshi/kalshi-logger/.venv/bin/python -m kalshi_logger run
+# Restart after a crash (or anything else), 30 seconds later, forever.
+Restart=always
+RestartSec=30
+# Stopping sends SIGTERM, which the logger treats like stop.bat; give it time to finish its current step.
+TimeoutStopSec=180
+# It writes its own log in logs/logger.log; only errors go to the system journal.
+StandardOutput=null
+StandardError=journal
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

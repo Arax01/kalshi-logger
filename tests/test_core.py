@@ -387,5 +387,63 @@ class PaperTests(unittest.TestCase):
         self.assertEqual(paper.place(conn, [(1, "Mentions", book)], 2000), 0)   # still resting
         self.assertEqual(paper.place(conn, [(1, "Mentions", book)], 1000 + 3601), 1)   # an hour later
 
+
+class MigrateTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        from kalshi_logger import config
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self._pid = config.PID_FILE
+        config.PID_FILE = self.dir / "logger.pid"
+        self.laptop = self.dir / "laptop.db"
+        import sqlite3
+        conn = sqlite3.connect(self.laptop)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE paper_orders (order_id INTEGER PRIMARY KEY, x TEXT)")
+        conn.executemany("INSERT INTO paper_orders(x) VALUES(?)", [("a",), ("b",), ("c",)])
+        conn.commit()
+        self.keep_open = conn   # leaves changes in the WAL, as a laptop might
+
+    def tearDown(self):
+        from kalshi_logger import config
+        self.keep_open.close()
+        config.PID_FILE = self._pid
+        self.tmp.cleanup()
+
+    def _export(self):
+        from kalshi_logger import migrate
+        out = self.dir / "out"
+        out.mkdir(exist_ok=True)
+        self.assertEqual(migrate.export_for_server(self.laptop, out), 0)
+        return out
+
+    def test_round_trip_keeps_every_row(self):
+        import sqlite3
+        from kalshi_logger import migrate
+        out = self._export()
+        server_db = self.dir / "server" / "kalshi.db"
+        self.assertEqual(migrate.import_from_laptop(out, server_db), 0)
+        self.assertEqual(sqlite3.connect(server_db).execute("SELECT COUNT(*) FROM paper_orders").fetchone()[0], 3)
+
+    def test_never_overwrites_an_existing_server_database(self):
+        from kalshi_logger import migrate
+        out = self._export()
+        server_db = self.dir / "kalshi.db"
+        server_db.write_bytes(b"server data")
+        self.assertEqual(migrate.import_from_laptop(out, server_db), 1)
+        self.assertEqual(server_db.read_bytes(), b"server data")
+
+    def test_damaged_upload_is_refused(self):
+        from kalshi_logger import migrate
+        out = self._export()
+        with open(out / migrate.UPLOAD, "r+b") as f:
+            f.seek(200)
+            f.write(b"XXXX")
+        server_db = self.dir / "server.db"
+        self.assertEqual(migrate.import_from_laptop(out, server_db), 1)
+        self.assertFalse(server_db.exists())
+
 if __name__ == "__main__":
     unittest.main()
