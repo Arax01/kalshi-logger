@@ -1,4 +1,6 @@
 """Human-readable status: is it running, what has been collected, any gaps or errors."""
+import os
+import shutil
 import time
 from datetime import datetime
 
@@ -30,6 +32,14 @@ def print_status():
     conn = db.connect()
     size = sum(p.stat().st_size for p in config.DB_PATH.parent.glob(config.DB_PATH.name + "*"))
     print(f"Database: {config.DB_PATH} ({size / 1e6:,.0f} MB)")
+    disk = shutil.disk_usage(config.DB_PATH.parent)
+    used = disk.used / disk.total
+    print(f"Disk: {used * 100:.0f}% used ({disk.free / 1e9:,.1f} GB free of {disk.total / 1e9:,.1f} GB)")
+    if used >= config.DISK_WARN_FRACTION and os.name != "nt":
+        print(f"  WARNING: the disk is over {config.DISK_WARN_FRACTION * 100:.0f}% full. Time to resize the server "
+              "to the $12 plan (SERVER.md, 'When the disk warning appears').")
+    if config.LAST_BACKUP_FILE.exists():
+        print("Last backup: " + config.LAST_BACKUP_FILE.read_text(encoding="utf-8").strip())
     runs = conn.execute("SELECT * FROM process_runs WHERE ended_ts IS NOT NULL ORDER BY run_id DESC").fetchall()
     if runs:
         last = runs[0]
@@ -51,6 +61,8 @@ def print_status():
         ("Crypto fair values", "SELECT COUNT(*) FROM crypto_fv WHERE ts > ?"),
         ("In-game snapshots", "SELECT COUNT(*) FROM game_snapshots WHERE ts > ?"),
         ("Order-book snapshots", "SELECT COUNT(*) FROM book_snapshots WHERE ts > ?"),
+        ("Paper orders placed", "SELECT COUNT(*) FROM paper_orders WHERE placed_ts > ?"),
+        ("Paper fills (pess.)", "SELECT COUNT(*) FROM paper_fills WHERE ts > ? AND scenario='pess'"),
     ]
     for label, sql in counts:
         print(f"  {label + ':':<24}{q(sql):,}")

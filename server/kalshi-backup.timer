@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Kalshi logger backup every day at 5 a.m. Pacific
+
+[Timer]
+OnCalendar=*-*-* 05:00:00
+RandomizedDelaySec=10min
+# If the server was off at 5 a.m., run the backup when it comes back.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

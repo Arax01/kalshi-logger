@@ -302,6 +302,29 @@ class RestingOrderTests(unittest.TestCase):
         self.assertFalse(_in_range(0.65, 0.40, 0.70, "no"))
         self.assertTrue(_in_range(0.99, 0.95, 0.995, "yes"))
 
+    def test_through_trade_fills_only_its_own_size_when_asked(self):
+        from kalshi_logger.rest_study import simulate
+        sim = simulate(self.P, [self._tr(1100, 0.62, 30)], 5000, None, through_fills_all=False)
+        self.assertEqual(sim["filled"], 30)       # queue cleared, but only 30 contracts traded
+
+    def test_child_orders_rejoin_the_back_of_the_queue(self):
+        from kalshi_logger.rest_study import simulate
+        # 24-contract pieces behind a 24-contract queue: the first 48 traded fill piece 1; the next piece
+        # waits behind another 24.
+        trades = [self._tr(1100, 0.60, 48), self._tr(1200, 0.60, 30), self._tr(1300, 0.60, 100)]
+        sim = simulate(self.P, trades, 24, None, child=24, through_fills_all=False)
+        self.assertEqual(sim["filled"], 24 + 6 + 18)
+        self.assertEqual(sim["first"], 1100)
+        # Without the queue, pieces fill straight from the trades (capped at the $100 order of 250).
+        self.assertEqual(simulate(self.P, [self._tr(1100, 0.60, 1000)], 0, None, child=24)["filled"], 24)
+
+    def test_rerun_verdict(self):
+        from kalshi_logger.rest_study import rerun_verdict
+        row = {"events": 40, "effective": 35, "lo": 0.01}
+        self.assertEqual(rerun_verdict([dict(row, events=10)]), "NOT YET TESTABLE")
+        self.assertEqual(rerun_verdict([row]), "SUPPORTED")
+        self.assertEqual(rerun_verdict([dict(row, lo=-0.01)]), "NOT SUPPORTED")
+
     def test_queue_sizes_fall_back_without_logged_data(self):
         import sqlite3
         from kalshi_logger import db, rest_study
@@ -311,6 +334,116 @@ class RestingOrderTests(unittest.TestCase):
         q = rest_study.queue_sizes(conn)
         self.assertEqual(q["Mentions (NO 30-60c)"][:2], rest_study.DEFAULT_QUEUE["Mentions (NO 30-60c)"])
 
+
+
+class PaperTests(unittest.TestCase):
+    def _order(self, queue=30):
+        # NO bid at 45c (= YES ask 55c), 24 contracts, `queue` contracts showing ahead.
+        return {"no_price": 0.45, "size": 24, "ahead_pess": queue, "ahead_opt": queue,
+                "filled_pess": 0.0, "filled_opt": 0.0}
+
+    def test_trades_at_our_price_go_through_the_queue_first(self):
+        from kalshi_logger.paper import apply_trade
+        o = self._order()
+        self.assertEqual(apply_trade(o, {"taker_side": "yes", "yes_price": 0.55, "count": 20}), {})
+        self.assertEqual(apply_trade(o, {"taker_side": "yes", "yes_price": 0.55, "count": 20}),
+                         {"pess": 10, "opt": 10})
+        self.assertEqual(apply_trade(o, {"taker_side": "no", "yes_price": 0.55, "count": 99}), {})
+        self.assertEqual(apply_trade(o, {"taker_side": "yes", "yes_price": 0.54, "count": 99}), {})
+
+    def test_trade_through_clears_queue_and_fills_its_own_size(self):
+        from kalshi_logger.paper import apply_trade
+        o = self._order(queue=500)
+        self.assertEqual(apply_trade(o, {"taker_side": "yes", "yes_price": 0.57, "count": 5}), {"pess": 5, "opt": 5})
+        self.assertEqual(apply_trade(o, {"taker_side": "yes", "yes_price": 0.57, "count": 50}),
+                         {"pess": 19, "opt": 19})   # capped at the 24-contract piece
+
+    def test_optimistic_queue_follows_the_book(self):
+        from kalshi_logger.paper import apply_book, apply_trade
+        o = self._order(queue=100)
+        row = {"nb1_cc": 4600, "nb1_size": 5, "nb2_cc": 4500, "nb2_size": 10, "nb3_cc": 4400, "nb3_size": 7}
+        apply_book(o, row)                                   # only 10 left at 45c
+        self.assertEqual((o["ahead_pess"], o["ahead_opt"]), (100, 10))
+        self.assertEqual(apply_trade(o, {"taker_side": "yes", "yes_price": 0.55, "count": 15}), {"opt": 5})
+        apply_book(o, dict(row, nb1_cc=4000, nb2_cc=3900, nb3_cc=3800))   # best NO bid now below ours
+        self.assertEqual(o["ahead_opt"], 0)
+        o2 = self._order(queue=100)
+        apply_book(o2, dict(row, nb1_cc=4900, nb2_cc=4800, nb3_cc=4700))  # our price not visible: unknown
+        self.assertEqual(o2["ahead_opt"], 100)
+
+    def test_place_respects_range_size_and_one_piece_per_hour(self):
+        import sqlite3
+        from kalshi_logger import db, paper
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(db.SCHEMA.replace("PRAGMA journal_mode=WAL;", ""))
+        book = {"no_dollars": [["0.4400", "100.00"], ["0.4500", "30.00"]], "yes_dollars": [["0.5000", "8.00"]]}
+        far = {"no_dollars": [["0.2000", "5.00"]], "yes_dollars": []}
+        n = paper.place(conn, [(1, "Mentions", book), (2, "Mentions", far), (3, "Entertainment", book)], 1000)
+        self.assertEqual(n, 2)
+        rows = {r["market_id"]: r for r in conn.execute("SELECT * FROM paper_orders")}
+        self.assertEqual((rows[1]["no_price"], rows[1]["size"], rows[1]["queue"]), (0.45, 24, 30))
+        self.assertEqual(rows[3]["size"], 200)   # Entertainment piece; $100 / 45c = 222 is the larger
+        self.assertEqual(paper.place(conn, [(1, "Mentions", book)], 2000), 0)   # still resting
+        self.assertEqual(paper.place(conn, [(1, "Mentions", book)], 1000 + 3601), 1)   # an hour later
+
+
+class MigrateTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        from kalshi_logger import config
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self._pid = config.PID_FILE
+        config.PID_FILE = self.dir / "logger.pid"
+        self.laptop = self.dir / "laptop.db"
+        import sqlite3
+        conn = sqlite3.connect(self.laptop)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE paper_orders (order_id INTEGER PRIMARY KEY, x TEXT)")
+        conn.executemany("INSERT INTO paper_orders(x) VALUES(?)", [("a",), ("b",), ("c",)])
+        conn.commit()
+        self.keep_open = conn   # leaves changes in the WAL, as a laptop might
+
+    def tearDown(self):
+        from kalshi_logger import config
+        self.keep_open.close()
+        config.PID_FILE = self._pid
+        self.tmp.cleanup()
+
+    def _export(self):
+        from kalshi_logger import migrate
+        out = self.dir / "out"
+        out.mkdir(exist_ok=True)
+        self.assertEqual(migrate.export_for_server(self.laptop, out), 0)
+        return out
+
+    def test_round_trip_keeps_every_row(self):
+        import sqlite3
+        from kalshi_logger import migrate
+        out = self._export()
+        server_db = self.dir / "server" / "kalshi.db"
+        self.assertEqual(migrate.import_from_laptop(out, server_db), 0)
+        self.assertEqual(sqlite3.connect(server_db).execute("SELECT COUNT(*) FROM paper_orders").fetchone()[0], 3)
+
+    def test_never_overwrites_an_existing_server_database(self):
+        from kalshi_logger import migrate
+        out = self._export()
+        server_db = self.dir / "kalshi.db"
+        server_db.write_bytes(b"server data")
+        self.assertEqual(migrate.import_from_laptop(out, server_db), 1)
+        self.assertEqual(server_db.read_bytes(), b"server data")
+
+    def test_damaged_upload_is_refused(self):
+        from kalshi_logger import migrate
+        out = self._export()
+        with open(out / migrate.UPLOAD, "r+b") as f:
+            f.seek(200)
+            f.write(b"XXXX")
+        server_db = self.dir / "server.db"
+        self.assertEqual(migrate.import_from_laptop(out, server_db), 1)
+        self.assertFalse(server_db.exists())
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,12 +4,15 @@
     python -m kalshi_logger stop       ask a running logger to stop (what stop.bat does)
     python -m kalshi_logger status     show what has been collected and any data gaps
     python -m kalshi_logger report     write any due reports, plus a preview of the latest data
-    python -m kalshi_logger once JOB   run one job once (scanner, crypto, ingame, results, books)
+    python -m kalshi_logger once JOB   run one job once (scanner, crypto, ingame, results, books, paper)
     python -m kalshi_logger backfill   download 2026 football games, then write the overreaction report
     python -m kalshi_logger overreaction   rewrite the overreaction report from backfilled data
     python -m kalshi_logger calibration    sample historical trades (resumable), then write the calibration study
     python -m kalshi_logger calibration --rerun   pre-registered clean re-test (see docs/preregistration-...)
     python -m kalshi_logger resting    resting-order study (replays history; needs calibration first)
+    python -m kalshi_logger check      quick live check that Kalshi's public API answers (used by server setup)
+    python -m kalshi_logger export-for-server     laptop side of move_to_server.bat
+    python -m kalshi_logger import-from-laptop    server side of move_to_server.bat
 """
 import sys
 
@@ -17,7 +20,7 @@ from . import config
 
 
 def build_jobs():
-    from . import books, crypto, ingame, reports, results, scanner
+    from . import books, crypto, ingame, paper, reports, results, scanner
     from .runner import Job
     return [
         Job("scanner", config.SCAN_INTERVAL_SEC, scanner.run_scan),
@@ -26,6 +29,7 @@ def build_jobs():
         Job("results", config.RESULTS_INTERVAL_SEC, results.run),
         Job("reports", config.REPORT_CHECK_INTERVAL_SEC, reports.run_due),
         Job("books", config.BOOKS_INTERVAL_SEC, books.run),
+        Job("paper", config.PAPER_INTERVAL_SEC, paper.run),
     ]
 
 
@@ -89,6 +93,18 @@ def main(argv):
             rest_study.pull(db.connect())
         print("Wrote", rest_study.write_report(db.connect()))
         return 0
+    if cmd == "check":
+        from . import http
+        data = http.kalshi.get("/markets", {"limit": 5, "status": "open"})
+        n = len(data.get("markets") or [])
+        print(f"Kalshi's public API answered: {n} sample open markets read (no key used).")
+        return 0 if n else 1
+    if cmd == "export-for-server":
+        from . import migrate
+        return migrate.export_for_server()
+    if cmd == "import-from-laptop":
+        from . import migrate
+        return migrate.import_from_laptop(config.DATA_DIR / "incoming")
     if cmd == "once":
         runner.setup_logging()
         from . import db

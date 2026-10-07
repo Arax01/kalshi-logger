@@ -33,6 +33,9 @@ LOG_DIR = ROOT / "logs"
 REPORT_DIR = ROOT / "reports"
 DB_PATH = Path(os.environ.get("DB_PATH", DATA_DIR / "kalshi.db"))
 STOP_FILE = ROOT / "STOP"
+MOVED_FILE = ROOT / "MOVED_TO_SERVER"     # written on the laptop once the database has moved to the server
+LAST_BACKUP_FILE = DATA_DIR / "last_backup.txt"   # written by the server's daily backup
+DISK_WARN_FRACTION = 0.70
 PID_FILE = DATA_DIR / "logger.pid"
 
 # Public, unauthenticated market-data API (documented as a supported production host).
@@ -82,3 +85,11 @@ BOOKS_CATEGORIES = [x.strip() for x in os.environ.get("BOOKS_CATEGORIES", "Enter
 BOOKS_MIN_VOLUME_24H = _int("BOOKS_MIN_VOLUME_24H", 100)
 BOOKS_MAX_MARKETS = _int("BOOKS_MAX_MARKETS", 1000)
 BOOKS_LEVELS = 3   # fixed: the table has columns for 3 levels per side
+
+# Forward paper trading (simulated resting NO orders; nothing is ever sent to Kalshi).
+PAPER_CATEGORIES = ["Mentions", "Entertainment"]
+PAPER_NO_MIN, PAPER_NO_MAX = 0.30, 0.60      # NO price range for a simulated order
+PAPER_ORDER_DOLLARS = 100.0
+PAPER_PIECE = {"Mentions": 24, "Entertainment": 200}   # largest piece: typical size at the best price
+PAPER_REORDER_SEC = _int("PAPER_REORDER_SEC", 3600)   # at most one new piece per market per hour
+PAPER_INTERVAL_SEC = _int("PAPER_INTERVAL_SEC", 15 * 60)   # how often trades are read for fills

@@ -11,6 +11,8 @@ cancel orders, and it needs no Kalshi account or API key. Everything it reads is
 | **Every open Kalshi market** (about 130,000): best bid and ask, the spread, size at those prices, volume, price change since the last check. Sorted by category and series, with player props broken out by sport and stat type (points, rebounds, passing yards...). Busy combos (parlays) are recorded from Kalshi's public trade feed. | every 20 min | Find where spreads are wide or prices jump around relative to trading |
 | **Bitcoin and Ethereum price markets**: our own "fair" probability from the live price and options-market volatility, next to Kalshi's prices, size, and the gap after Kalshi's fees, for buying and for selling | every 2 min | A control group: a market where fair value can be calculated |
 | **NFL, NBA, MLB, NHL and college football games in progress**: game-winner prices next to the score, quarter or inning, clock and last play | every 60 s | Later: do prices overreact to big moments and then come back? |
+| **Order books of busy Entertainment and Mentions markets**: the top 3 prices on each side, with sizes | every 3 min | Shows how many contracts wait at the best price (the queue a resting order joins) |
+| **Paper trading** (simulated only, never sent to Kalshi): a small resting NO order at 30-60c in those markets, whether later trades would have filled it, and how it settled | placed every 3 min, fills checked every 15 min | Tests resting orders on live markets, going forward |
 | **The final result of every market above** | hourly | To check whether fair values and price moves were right |
 
 Reports are written to the `reports` folder in plain English:
@@ -24,6 +26,14 @@ Reports are written to the `reports` folder in plain English:
   longshot check: do crypto contracts priced under 10 cents win as often as their price says? It
   also shows what the in-game logger collected. If the scanner didn't run that week, the report
   says so and still includes the crypto, longshot and in-game sections.
+  Its last section is **paper trading**: simulated orders placed that week and how many filled, and,
+  since paper trading started, profit after fees on orders whose market has settled (with ranges).
+
+## Running it on a cloud server instead
+
+To keep it running 24/7 (about $6 a month), see **[SERVER.md](SERVER.md)**: a step-by-step guide,
+with double-click files to set up the server, move your data, check on it, get reports, back it up
+and update it.
 
 ## One-time setup (Windows)
 
@@ -74,7 +84,7 @@ is still the tidier way to stop it.
 
 - `data\kalshi.db` is all the recorded data, in one SQLite database file. Expect up to about 110 MB a day
   on busy sports days, less on quiet days (roughly 1.7-3.3 GB a month). That includes about 5-10 MB a day
-  of order-book snapshots for Entertainment and Mentions markets. To start over, stop the logger and delete the `data`
+  of order-book snapshots for Entertainment and Mentions markets, and under 1 MB a day of paper trading. To start over, stop the logger and delete the `data`
   folder.
 - `reports\` holds the reports. `logs\` holds a technical log, useful if something goes wrong.
 - None of these are uploaded anywhere or saved to GitHub.

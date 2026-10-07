@@ -16,4 +16,6 @@
 
 ## Practical
 - The owner runs the logger on Windows; keep `.bat` files working and the README plain English.
+- The logger is moving to a DigitalOcean Ubuntu 24.04 server (SERVER.md, `server/`), run as the `kalshi`
+  user by systemd, with backups to Backblaze B2. The laptop .bat files reach it over SSH. Keep both working.
 - Run tests with `python -m unittest discover tests`.

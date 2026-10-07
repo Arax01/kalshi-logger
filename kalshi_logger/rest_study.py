@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS rest_tape (
 );
 CREATE INDEX IF NOT EXISTS rest_tape_ticker ON rest_tape(ticker, ts);
 CREATE TABLE IF NOT EXISTS rest_tape_done (ticker TEXT PRIMARY KEY, from_ts INTEGER, truncated INTEGER);
+CREATE TABLE IF NOT EXISTS rest_rerun_months (month TEXT PRIMARY KEY, sampled_ts INTEGER);
 """
 
 
@@ -169,7 +170,7 @@ def pull(conn, progress=print):
     conn.executescript(SCHEMA)
     _sample_points(conn)
     cut = parse_ts(http.kalshi.get("/historical/cutoff")["trades_created_ts"])
-    todo = conn.execute("SELECT * FROM rest_points WHERE done=0 ORDER BY ticker, t").fetchall()
+    todo = conn.execute("SELECT * FROM rest_points WHERE done=0 AND grp NOT LIKE 'rerun %' ORDER BY ticker, t").fetchall()
     progress(f"Resting-order study: {len(todo)} order moments to fetch...")
     first_t = {}
     for p in todo:
@@ -243,25 +244,33 @@ def _in_range(price, lo, hi, side):
     return a - 1e-9 <= price <= b + 1e-9
 
 
-def simulate(point, trades, queue, wait):
-    """Contracts filled and time of the first fill for one resting order.
+def simulate(point, trades, queue, wait, child=None, through_fills_all=True):
+    """Contracts filled and time of the first fill for one resting order of about $100.
 
     NO bid at q (= YES ask at a = 1 - q): fills against takers buying YES at a. A taker buying YES above a
-    means everything at a was used up, so our order is fully filled by then.
-    YES bid at p: fills against takers selling YES (buying NO) at p; a trade below p means fully filled.
+    means everything at a was used up first (the queue ahead is gone).
+    YES bid at p: fills against takers selling YES (buying NO) at p; a trade below p means the same.
+
+    child=None: the whole $100 order rests at once (the original study).
+    child=S: realistic sizing. At most S contracts rest at a time; when they have all filled, the next S are
+    posted at the same price at the back of the queue (the same queue size again), until $100 has filled
+    or the wait ends. A partly filled child is cancelled at the end.
+    through_fills_all=True: a trade through our price fills everything we have resting (the original study).
+    False: it clears the queue ahead but fills us only with that trade's own contracts.
     """
     side = point["side"]
     if side == "no":
         level = point["yes_ask"]
-        price = 1 - level
+        price = None if level is None else 1 - level
     else:
         level = point["yes_bid"]
         price = level
     if level is None or not 0 < price < 1:
         return None
     size = math.floor(ORDER_DOLLARS / price)
+    step = size if child is None else max(1, min(int(child), size))
     end = point["close_ts"] if wait is None else min(point["close_ts"], point["t"] + wait)
-    done = 0.0
+    cur, got, ahead, filled = step, 0.0, float(queue), 0.0
     first = full = None
     for tr in trades:
         if tr["ts"] <= point["t"] or tr["ts"] > end or tr["yes_price"] is None:
@@ -272,22 +281,30 @@ def simulate(point, trades, queue, wait):
         else:
             hits = tr["taker_side"] == "no" and abs(tr["yes_price"] - level) < 1e-9
             through = tr["taker_side"] == "no" and tr["yes_price"] < level - 1e-9
+        if not (hits or through):
+            continue
+        vol = tr["count"] or 0.0
         if through:
-            done = queue + size
-        elif hits:
-            done += tr["count"]
-        filled = min(max(done - queue, 0.0), size)
-        if filled > 0 and first is None:
-            first = tr["ts"]
+            ahead = 0.0
+            if through_fills_all:
+                vol = math.inf
+        take = min(max(vol - ahead, 0.0), cur - got)
+        ahead = max(ahead - vol, 0.0)
+        if take > 0:
+            got += take
+            filled += take
+            if first is None:
+                first = tr["ts"]
         if filled >= size:
             full = tr["ts"]
             break
-    filled = min(max(done - queue, 0.0), size)
+        if got >= cur:   # this child is done: post the next one at the back of the queue
+            cur, got, ahead = min(step, size - filled), 0.0, float(queue)
     return {"price": price, "size": size, "filled": filled, "first": first, "full": full}
 
 
-def _cluster_ratio(by_event):
-    """Ratio of sums with a 95% range treating each event as one unit."""
+def _cluster_ratio(by_event, z=1.96):
+    """Ratio of sums with a range (95% by default) treating each event as one unit."""
     N = sum(n for n, _ in by_event.values())
     D = sum(d for _, d in by_event.values())
     if D <= 0:
@@ -295,7 +312,7 @@ def _cluster_ratio(by_event):
     r = N / D
     var = sum((n - r * d) ** 2 for n, d in by_event.values()) / (D * D)
     se = math.sqrt(var)
-    return r, r - 1.96 * se, r + 1.96 * se
+    return r, r - z * se, r + z * se
 
 
 def _pc(x):
@@ -304,6 +321,64 @@ def _pc(x):
 
 def _rng(v, lo, hi):
     return "n/a" if v is None else f"{_pc(v)} ({_pc(lo)} to {_pc(hi)})"
+
+
+SIZINGS = [
+    # label, child size (None = whole order at once; "typical" = typical size at the best price),
+    # whether a trade through our price fills everything we have resting
+    ("A. as in the first run: whole $100 order rests; a trade through our price fills all of it", None, True),
+    ("B. whole $100 order rests; a trade through our price fills only its own contracts", None, False),
+    ("C. realistic: pieces no bigger than the typical size, re-queued after each fill", "typical", False),
+]
+REALISTIC = SIZINGS[2]
+
+
+def _evaluate(gp, tapes, feebook, side, queue, wait, child, through_all):
+    """Fill rate, $ filled, returns and markouts for one set of order moments under one set of rules."""
+    fills, waits, marks5, marks30, dollars = [], [], [], [], []
+    instant = defaultdict(lambda: [0.0, 0.0])
+    filled_ev = defaultdict(lambda: [0.0, 0.0])
+    placed_ev = defaultdict(lambda: [0.0, 0.0])
+    for p in gp:
+        sim = simulate(p, tapes.get(p["ticker"], []), queue, wait, child=child, through_fills_all=through_all)
+        if sim is None:
+            continue
+        won = 1.0 if p["result"] == side else 0.0
+        ft, fm = feebook.at(p["series_ticker"], p["t"])
+        # Instant-fill benchmark: the whole order at our price, as if filled immediately.
+        _, f_inst = trade_fees(ft, fm, sim["price"], sim["size"])
+        instant[p["event_ticker"]][0] += sim["size"] * won - f_inst
+        instant[p["event_ticker"]][1] += sim["size"] * sim["price"]
+        fills.append(sim["filled"] > 0)
+        dollars.append(sim["filled"] * sim["price"])
+        if sim["filled"] > 0:
+            _, f_m = trade_fees(ft, fm, sim["price"], sim["filled"])
+            filled_ev[p["event_ticker"]][0] += sim["filled"] * won - f_m
+            filled_ev[p["event_ticker"]][1] += sim["filled"] * sim["price"]
+            placed_ev[p["event_ticker"]][0] += sim["filled"] * (won - sim["price"]) - f_m
+            waits.append((sim["first"] - p["t"]) / 60)
+            mids = {int(k): v for k, v in json.loads(p["mids"] or "{}").items()}
+            for horizon, bucket in ((300, marks5), (1800, marks30)):
+                later = [v for k, v in sorted(mids.items()) if k >= sim["first"] + horizon]
+                if later:
+                    m = later[0] if side == "yes" else 1 - later[0]
+                    bucket.append(m - sim["price"])   # value of what we bought, vs. what we paid
+        placed_ev[p["event_ticker"]][1] += ORDER_DOLLARS
+    if not fills:
+        return None
+    sub1 = lambda r: tuple(None if x is None else x - 1 for x in r)
+    return {"n": len(fills), "fill_rate": sum(fills) / len(fills), "dollars": statistics.mean(dollars),
+            "wait": statistics.median(waits) if waits else None,
+            "ret": sub1(_cluster_ratio(filled_ev)), "instant": sub1(_cluster_ratio(instant))[0],
+            "per_order": _cluster_ratio(placed_ev),
+            "m5": statistics.mean(marks5) if marks5 else None, "m30": statistics.mean(marks30) if marks30 else None,
+            "n_marks": len(marks5)}
+
+
+def _row_cells(e):
+    return [f"{e['fill_rate'] * 100:.0f}%", f"${e['dollars']:.0f}",
+            f"{e['wait']:.0f} min" if e["wait"] is not None else "n/a", _rng(*e["ret"]), _pc(e["instant"]),
+            f"${e['per_order'][0] * ORDER_DOLLARS:+.2f}" if e["per_order"][0] is not None else "n/a"]
 
 
 def build_report(conn):
@@ -323,11 +398,16 @@ def build_report(conn):
          f"about ${ORDER_DOLLARS:.0f}. Kalshi's public trade history decides whether it would have filled: it "
          "fills only after the contracts already waiting at that price (the queue) have traded. The real queue "
          "can't be seen, so three cases are shown: 'front' (nobody ahead), 'typical' (median size at the best "
-         "price) and 'long' (90th percentile).", ""]
+         "price) and 'long' (90th percentile).", "",
+         "Sizing (realistic): $100 is worked in pieces no bigger than the typical size at the best price. Each "
+         "piece joins the back of the queue, and the next is posted only after it has filled. A trade at a "
+         "worse price than ours fills us only with that trade's own contracts. The last section compares this "
+         "with the first run's sizing.", ""]
     rows = [[g, f"{q[0]:,.0f}", f"{q[1]:,.0f}", q[2]] for g, q in queues.items()]
-    L += ["Queue sizes used (contracts waiting at the best price):",
+    L += ["Queue sizes used (contracts waiting at the best price; the typical size is also the piece size):",
           _table(["Group", "Typical", "Long", "Source"], rows), ""]
 
+    groups = []
     for grp, (cat, lo, hi, side) in GROUPS.items():
         gp_all = [p for p in pts if p["grp"] == grp]
         # Keep only moments where our resting price itself is in the range (the sampled trade was, but the
@@ -335,6 +415,7 @@ def build_report(conn):
         gp = [p for p in gp_all if _in_range(order_price(p), lo, hi, side)]
         if not gp:
             continue
+        groups.append((grp, side, gp))
         n_mk = len({p["ticker"] for p in gp})
         n_ev = len({p["event_ticker"] for p in gp})
         tr_note = sum(1 for p in gp if p["ticker"] in truncated)
@@ -346,69 +427,40 @@ def build_report(conn):
                  "after that point are missed, so their fill rates are understated)." if tr_note else ""), ""]
         typ, lng, _ = queues[grp]
         qmap = {"front": 0.0, "typical": typ, "long": lng}
-        rows = []
-        markout_rows = []
+        rows, markout_rows = [], []
         for wlabel, wait in WAITS:
             for case in CASES:
-                fills = []
-                instant = defaultdict(lambda: [0.0, 0.0])
-                filled_ev = defaultdict(lambda: [0.0, 0.0])
-                placed_ev = defaultdict(lambda: [0.0, 0.0])
-                waits = []
-                marks5, marks30 = [], []
-                for p in gp:
-                    sim = simulate(p, tapes.get(p["ticker"], []), qmap[case], wait)
-                    if sim is None:
-                        continue
-                    won = 1.0 if p["result"] == side else 0.0
-                    ft, fm = feebook.at(p["series_ticker"], p["t"])
-                    # Instant-fill benchmark: the whole order at our price, as if filled immediately.
-                    _, f_inst = trade_fees(ft, fm, sim["price"], sim["size"])
-                    instant[p["event_ticker"]][0] += sim["size"] * won - f_inst
-                    instant[p["event_ticker"]][1] += sim["size"] * sim["price"]
-                    fills.append(sim["filled"] > 0)
-                    if sim["filled"] > 0:
-                        _, f_m = trade_fees(ft, fm, sim["price"], sim["filled"])
-                        pnl = sim["filled"] * (won - sim["price"]) - f_m
-                        filled_ev[p["event_ticker"]][0] += sim["filled"] * won - f_m
-                        filled_ev[p["event_ticker"]][1] += sim["filled"] * sim["price"]
-                        placed_ev[p["event_ticker"]][0] += pnl
-                        waits.append((sim["first"] - p["t"]) / 60)
-                        mids = {int(k): v for k, v in json.loads(p["mids"] or "{}").items()}
-                        for horizon, bucket in ((300, marks5), (1800, marks30)):
-                            later = [v for k, v in sorted(mids.items()) if k >= sim["first"] + horizon]
-                            if later:
-                                m = later[0] if side == "yes" else 1 - later[0]
-                                bucket.append(m - sim["price"])   # value of what we bought, vs. what we paid
-                    placed_ev[p["event_ticker"]][1] += ORDER_DOLLARS
-                n = len(fills)
-                if not n:
+                e = _evaluate(gp, tapes, feebook, side, qmap[case], wait, typ, False)
+                if e is None:
                     continue
-                f_rate = sum(fills) / n
-                ret_f = _cluster_ratio(filled_ev)
-                ret_i = _cluster_ratio(instant)
-                per_order = _cluster_ratio(placed_ev)
-                rows.append([wlabel, case, n, f"{f_rate * 100:.0f}%",
-                             f"{statistics.median(waits):.0f} min" if waits else "n/a",
-                             _rng(ret_f[0] - 1 if ret_f[0] is not None else None,
-                                  ret_f[1] - 1 if ret_f[1] is not None else None,
-                                  ret_f[2] - 1 if ret_f[2] is not None else None),
-                             _pc(ret_i[0] - 1 if ret_i[0] is not None else None),
-                             f"${per_order[0] * ORDER_DOLLARS:+.2f}" if per_order[0] is not None else "n/a"])
+                rows.append([wlabel, case, e["n"]] + _row_cells(e))
                 if case == "typical":
-                    markout_rows.append([wlabel, len(marks5),
-                                         f"{statistics.mean(marks5) * 100:+.1f}c" if marks5 else "n/a",
-                                         f"{statistics.mean(marks30) * 100:+.1f}c" if marks30 else "n/a"])
-        L += [_table(["Wait", "Queue", "Orders", "Filled (any)", "Typical wait to first fill",
+                    markout_rows.append([wlabel, e["n_marks"], f"{e['m5'] * 100:+.1f}c" if e["m5"] is not None
+                                         else "n/a", f"{e['m30'] * 100:+.1f}c" if e["m30"] is not None else "n/a"])
+        L += [_table(["Wait", "Queue", "Orders", "Filled (any)", "Avg $ filled", "Typical wait to first fill",
                       "Return/$ on filled contracts (95% range)", "If every order filled instantly",
                       "Expected profit per $100 order placed"], rows), ""]
         L += ["Short-term adverse selection (typical queue): how the value of what we bought moved after the fill, "
               "in cents per contract (negative = the price moved against us right after we were filled):",
               _table(["Wait", "Fills with price data", "+5 min", "+30 min"], markout_rows), ""]
 
+    L += ["HOW MUCH THE SIZING MATTERS (typical queue)"] + [label for label, _, _ in SIZINGS] + [""]
+    for grp, side, gp in groups:
+        typ = queues[grp][0]
+        rows = []
+        for wlabel, wait in WAITS:
+            for label, child, through_all in SIZINGS:
+                e = _evaluate(gp, tapes, feebook, side, typ, wait, typ if child == "typical" else None, through_all)
+                if e is not None:
+                    rows.append([wlabel, label[:2].strip(". ")] + _row_cells(e))
+        L += [grp, _table(["Wait", "Sizing", "Filled (any)", "Avg $ filled", "Typical wait to first fill",
+                           "Return/$ on filled contracts (95% range)", "If every order filled instantly",
+                           "Expected profit per $100 order placed"], rows), ""]
+
     L += ["HOW TO READ THIS",
           "- 'Filled (any)': share of orders that got at least some contracts by the end of the wait. Unfilled "
           "orders are cancelled and cost nothing.",
+          "- 'Avg $ filled': dollars actually invested per order, counting unfilled orders as $0 (out of $100).",
           "- 'Return/$ on filled contracts': profit per dollar at settlement, after the maker fee in effect at the "
           "time (most series charge makers nothing), on the contracts that actually filled.",
           "- 'If every order filled instantly': the same orders at the same prices, as if all filled at once. The "
@@ -422,6 +474,8 @@ def build_report(conn):
           "- Fills from orders posted at the same price after yours are correctly excluded (first come, first "
           "served), but a better price posted by someone else after you would take fills from you; that is "
           "only partly captured (trades at their better price don't count for you).",
+          "- Whether your own order would have changed what others did (a bigger order showing in the book can "
+          "put takers off or attract them). Realistic sizing keeps the order no bigger than what usually rests.",
           "- 1-minute prices are used for the price at the moment of the order and for the after-fill moves. The "
           "order goes in at the close of the minute containing the sampled trade. Within a minute the real best "
           "price can differ from the 1-minute close, so some orders are a cent better or worse than the true best.",
@@ -432,6 +486,115 @@ def build_report(conn):
           "calibration pull, so very long-dated markets are under-represented.",
           ""]
     return "\n".join(L)
+
+
+# ---------- pre-registered re-test (H5, H6; see docs/preregistration-calibration-rerun.md) ----------
+# Frozen on October 6, 2026. Do not change: the clean re-test depends on these exact numbers.
+
+RERUN_GROUPS = {
+    # hypothesis: (category, YES price range of the sampled trade, side, child size, typical queue, long queue)
+    "H5": ("Mentions", 0.40, 0.70, "no", 24, 24, 102),
+    "H6": ("Entertainment", 0.40, 0.70, "no", 200, 200, 1363),
+}
+RERUN_Z = 2.64          # 97.5% for two looks, split again over the three wait times
+RERUN_MIN_EVENTS = 30
+
+
+def sample_fresh(conn, months):
+    """Every sampled fresh trade in the H5/H6 ranges becomes an order moment (at most 3 per market per
+    month, chosen with a fixed seed). months: (label, start, end) of complete months from October 6, 2026."""
+    conn.executescript(SCHEMA)
+    for month, t0, t1 in months:
+        if conn.execute("SELECT 1 FROM rest_rerun_months WHERE month=?", (month,)).fetchone():
+            continue
+        rng = random.Random(f"kalshi-resting-order-rerun-{month}")
+        for hid, (cat, lo, hi, side, *_rest) in RERUN_GROUPS.items():
+            rows = conn.execute(
+                "SELECT t.ticker, t.ts, m.series_ticker, m.event_ticker, m.close_ts FROM calib_trades t "
+                "JOIN calib_markets m ON m.ticker=t.ticker WHERE m.category=? AND t.yes_price>=? AND t.yes_price<? "
+                "AND t.ts>=? AND t.ts<? ORDER BY t.ticker, t.ts", (cat, lo, hi, t0, t1)).fetchall()
+            rng.shuffle(rows)
+            per_market, picked = defaultdict(int), []
+            for r in rows:
+                if per_market[r["ticker"]] < MAX_PER_MARKET:
+                    per_market[r["ticker"]] += 1
+                    picked.append(r)
+            conn.executemany(
+                "INSERT INTO rest_points(grp,ticker,series_ticker,event_ticker,t,close_ts,side) VALUES(?,?,?,?,?,?,?)",
+                [(f"rerun {hid}", r["ticker"], r["series_ticker"], r["event_ticker"], r["ts"], r["close_ts"], side)
+                 for r in picked])
+        conn.execute("INSERT INTO rest_rerun_months VALUES(?,?)", (month, int(time.time())))
+        conn.commit()
+
+
+def pull_rerun(conn, progress=print):
+    """Quotes and trade history for fresh order moments whose market has settled (others wait)."""
+    cut = parse_ts(http.kalshi.get("/historical/cutoff")["trades_created_ts"])
+    todo = conn.execute(
+        "SELECT p.*, m.result AS m_result, m.close_ts AS m_close FROM rest_points p JOIN calib_markets m "
+        "ON m.ticker=p.ticker WHERE p.grp LIKE 'rerun %' AND p.done=0 AND m.result IN ('yes','no') "
+        "ORDER BY p.ticker, p.t").fetchall()
+    progress(f"Resting-order re-test: {len(todo)} settled order moments to fetch...")
+    for i, p in enumerate(todo, 1):
+        try:
+            conn.execute("UPDATE rest_points SET result=?, close_ts=? WHERE point_id=?",
+                         (p["m_result"], p["m_close"], p["point_id"]))
+            p = conn.execute("SELECT * FROM rest_points WHERE point_id=?", (p["point_id"],)).fetchone()
+            _tape(conn, p["ticker"], p["t"], p["close_ts"] + 60, cut)
+            _quotes(conn, p)
+            conn.execute("UPDATE rest_points SET done=1 WHERE point_id=? AND done=0", (p["point_id"],))
+        except http.ApiError as exc:
+            log.warning("Skipping %s for now: %s", p["ticker"], exc)
+        conn.commit()
+        if i % 100 == 0:
+            progress(f"  {i}/{len(todo)}")
+
+
+def rerun_results(conn, hid, data_end, z=RERUN_Z):
+    """Per wait time: orders, share filled, events and effective events with fills, and the return per $1
+    on filled contracts after fees with its range. Typical queue and realistic sizing (frozen)."""
+    conn.executescript(SCHEMA)
+    cat, lo, hi, side, child, queue, _ = RERUN_GROUPS[hid]
+    feebook = FeeBook(conn)
+    pts = [p for p in conn.execute(
+        "SELECT * FROM rest_points WHERE grp=? AND done=1 AND t<? AND result IN ('yes','no') "
+        "AND yes_bid IS NOT NULL AND yes_ask IS NOT NULL", (f"rerun {hid}", data_end))
+        if _in_range(order_price(p), lo, hi, side)]
+    tapes = defaultdict(list)
+    for tk in {p["ticker"] for p in pts}:
+        tapes[tk] = conn.execute("SELECT * FROM rest_tape WHERE ticker=? ORDER BY ts", (tk,)).fetchall()
+    out = []
+    for wlabel, wait in WAITS:
+        by_ev = defaultdict(lambda: [0.0, 0.0])
+        n = nf = 0
+        for p in pts:
+            sim = simulate(p, tapes[p["ticker"]], queue, wait, child=child, through_fills_all=False)
+            if sim is None:
+                continue
+            n += 1
+            if sim["filled"] > 0:
+                nf += 1
+                ft, fm = feebook.at(p["series_ticker"], p["t"])
+                _, fee = trade_fees(ft, fm, sim["price"], sim["filled"])
+                won = 1.0 if p["result"] == side else 0.0
+                by_ev[p["event_ticker"]][0] += sim["filled"] * won - fee
+                by_ev[p["event_ticker"]][1] += sim["filled"] * sim["price"]
+        cost = [d for _, d in by_ev.values()]
+        eff = (sum(cost) ** 2 / sum(c * c for c in cost)) if cost else 0.0
+        r, rlo, rhi = _cluster_ratio(by_ev, z)
+        out.append({"wait": wlabel, "orders": n, "filled": nf, "events": len(by_ev), "effective": eff,
+                    "ret": None if r is None else r - 1, "lo": None if rlo is None else rlo - 1,
+                    "hi": None if rhi is None else rhi - 1})
+    return out
+
+
+def rerun_verdict(rows):
+    testable = [r for r in rows if r["events"] >= RERUN_MIN_EVENTS and r["effective"] >= RERUN_MIN_EVENTS]
+    if not testable:
+        return "NOT YET TESTABLE"
+    if any(r["lo"] is not None and r["lo"] > 0 for r in testable):
+        return "SUPPORTED"
+    return "NOT SUPPORTED"
 
 
 def write_report(conn):

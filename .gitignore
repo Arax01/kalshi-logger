@@ -24,6 +24,8 @@ credentials*
 secrets*
 
 # --- Runtime files ---
+MOVED_TO_SERVER
+server_address.txt
 *.pid
 STOP
 

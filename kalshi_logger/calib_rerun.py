@@ -12,7 +12,7 @@ import random
 import time
 from datetime import datetime, timezone
 
-from . import calib_pull, calib_report as cr, config, http
+from . import calib_pull, calib_report as cr, config, http, rest_study
 from .util import parse_ts
 
 CLEAN_START = calendar.timegm((2026, 10, 6, 0, 0, 0))
@@ -72,6 +72,9 @@ def pull(conn, progress=print):
     conn.commit()
     progress(f"Re-checking {n:,} markets that had not settled before...")
     calib_pull.lookup_markets(conn, cut_markets, series, progress)
+    # H5/H6: resting-order moments drawn from the fresh sample, replayed once their market has settled.
+    rest_study.sample_fresh(conn, _complete_months(time.time()))
+    rest_study.pull_rerun(conn, progress)
 
 
 def _fresh_groups(conn, max_ts=None):
@@ -120,6 +123,24 @@ def build_report(conn, now=None):
     L += ["PRE-REGISTERED HYPOTHESES (fresh test set only)",
           cr._table(["#", "Bucket", "Claim", "Side that must profit", "Events", "Effective events", "Result"], rows),
           ""]
+    # H5/H6: resting NO orders, added October 6, 2026 (resting-order study rules, realistic sizing).
+    data_end = look[1] if look else int(now) + 1
+    rrows = []
+    for hid, (cat, *_x) in rest_study.RERUN_GROUPS.items():
+        res = rest_study.rerun_results(conn, hid, data_end)
+        verdict = "results hidden until the first look" if look is None else rest_study.rerun_verdict(res)
+        for r in res:
+            shown = "" if look is None else (
+                f"{cr._pct(r['ret'])} [{cr._pct(r['lo'])} to {cr._pct(r['hi'])}]" if r["ret"] is not None else "n/a")
+            rrows.append([hid, f"{cat}, NO 30-60c resting", r["wait"], r["orders"], r["events"],
+                          f"{r['effective']:.0f}", shown, verdict if r is res[0] else ""])
+    L += ["RESTING-ORDER HYPOTHESES (added October 6, 2026; fresh test set only)",
+          "Claim: a resting NO order at the best NO bid, when NO costs 30-60c, makes money after fees on the "
+          "contracts that fill (typical queue, realistic sizing). SUPPORTED if, at any of the three wait times, "
+          "there are 30+ events and 30+ effective events with fills and the return's 99.2% range (z = 2.64) is "
+          "above zero.",
+          cr._table(["#", "Bucket", "Wait", "Orders placed", "Events with fills", "Effective events",
+                     "Return/$1 on filled contracts", "Result"], rrows), ""]
     if look is None:
         L += [f"No results are shown before {LOOKS[0][1]}, by design. The event counts above show whether each "
               "hypothesis will be testable at the first look (it needs 30 events and 30 effective events).", ""]

@@ -72,3 +72,48 @@ One without enough events is NOT YET TESTABLE.
 
 The re-test report may also search the earlier data for new patterns, with the same rules as the first
 study. Anything found there is labelled exploratory and would need its own future test set.
+
+## Addendum, October 6, 2026: resting-order hypotheses H5 and H6
+
+Added at the owner's request on October 6, 2026, before any trade from October 6 onward had been
+pulled or looked at. The fresh re-test pull has not been run yet, and nothing in the logger's live data
+from October 6 on has been examined. H1-H4 and every rule above are unchanged. The git commit that adds
+this section is the timestamp for H5 and H6. The rules are the code in `kalshi_logger/rest_study.py`
+(`RERUN_GROUPS`, `simulate`, `rerun_results`, `rerun_verdict`) as of that commit.
+
+| # | Orders | Claim |
+|---|---|---|
+| H5 | Mentions: resting NO order at the best NO bid when NO costs 30-60c | makes money after fees on the contracts that fill |
+| H6 | Entertainment: the same | the same |
+
+**Order moments.** Every trade in the fresh sample (from October 6, 2026, complete months only) in that
+category with a YES price of 40-70c, at most 3 per market per month (fixed seed per month). The order
+goes in at the close of the 1-minute candle containing the trade, at the best NO bid then (1 minus the
+YES ask). It is kept only if that NO price is 30-60c.
+
+**Fill rules (the resting-order study's, with realistic sizing):**
+- About $100 per order, worked through smaller pieces. At most a set number of contracts rest at a time:
+  24 for Mentions, 200 for Entertainment. That is the median size at the best price in the logger's
+  snapshots, frozen here.
+- Each piece waits behind a queue of the same size (24 / 200 contracts), frozen here. When a piece has
+  fully filled, the next is posted at the same price at the back of the queue.
+- A taker buying YES at our price fills the queue first, then us, contract for contract.
+- A taker buying YES at a higher price clears the queue ahead, and fills us with that trade's own
+  contracts only.
+- Pieces stop when $100 has filled or the wait ends. Unfilled pieces are cancelled at no cost.
+- Three wait times: 5 minutes, 1 hour, until close.
+
+**Measure.** Return per $1 on the filled contracts at settlement, after the maker fee in effect at the
+order time. Ranges are clustered by event. Effective events are computed from dollars filled per event.
+
+**SUPPORTED at a look** if, at any one of the three wait times, all of these hold:
+- there are at least 30 events with fills, and at least 30 effective events;
+- the return's range is above zero.
+
+The range is 99.2% (z = 2.64): 97.5% for two looks, split again three ways for the three wait times. The
+other outcomes are NOT SUPPORTED (testable but no wait time passes) and NOT YET TESTABLE. Looks and the
+results-hidden rule are the same as H1-H4.
+
+**Forward paper trading** (the logger's live simulated orders, also from October 6, 2026) is a separate
+measurement and is not this test. Its weekly numbers will be visible, so they must not be used to
+change H5 or H6. Any change would need a new pre-registration and a new test period.

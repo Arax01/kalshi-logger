@@ -11,7 +11,7 @@ to keep the database small. Uses Kalshi's public batch order-book endpoint (100 
 import logging
 import time
 
-from . import config, db, http
+from . import config, db, http, paper
 from .util import num, to_cc
 
 log = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ _last = {}   # market_id -> (levels tuple, ts)
 def targets(conn, now):
     cats = config.BOOKS_CATEGORIES
     return conn.execute(
-        f"SELECT m.market_id, m.ticker FROM markets m JOIN scan_snapshots s "
+        f"SELECT m.market_id, m.ticker, m.category FROM markets m JOIN scan_snapshots s "
         f"ON s.market_id=m.market_id AND s.ts=m.last_snap_ts "
         f"WHERE m.category IN ({','.join('?' * len(cats))}) AND s.volume_24h >= ? AND m.close_ts > ? "
         f"ORDER BY s.volume_24h DESC LIMIT ?",
@@ -47,17 +47,20 @@ def run(after_gap=False):
     if not mk:
         return
     ids = {r["ticker"]: r["market_id"] for r in mk}
+    cats = {r["market_id"]: r["category"] for r in mk}
     tickers = list(ids)
     n = config.BOOKS_LEVELS
-    written = 0
+    written = placed = 0
     for i in range(0, len(tickers), 100):
         data = http.kalshi.get("/markets/orderbooks", {"tickers": tickers[i: i + 100]})
         ts = int(time.time())
+        fetched = []
         for ob in data.get("orderbooks") or []:
             mid = ids.get(ob.get("ticker"))
             if mid is None:
                 continue
             book = ob.get("orderbook_fp") or {}
+            fetched.append((mid, cats[mid], book))
             levels = tuple(top_levels(book.get("yes_dollars"), n) + top_levels(book.get("no_dollars"), n))
             prev = _last.get(mid)
             if prev and prev[0] == levels and ts - prev[1] < KEEPALIVE_SEC:
@@ -67,5 +70,7 @@ def run(after_gap=False):
                 (mid, ts, *levels))
             _last[mid] = (levels, ts)
             written += 1
+        # Forward paper trading: simulated orders only, nothing is sent to Kalshi.
+        placed += paper.place(conn, fetched, ts)
         conn.commit()
-    log.info("Books: %d markets checked, %d snapshots stored", len(tickers), written)
+    log.info("Books: %d markets checked, %d snapshots stored, %d paper orders placed", len(tickers), written, placed)

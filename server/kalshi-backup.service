@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily encrypted backup of the Kalshi logger database to Backblaze B2
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=kalshi
+Group=kalshi
+ExecStart=/home/kalshi/kalshi-logger/server/backup.sh
+Nice=10
+IOSchedulingClass=idle
